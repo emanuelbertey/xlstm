@@ -141,17 +141,17 @@ impl<B: Backend> SLSTMLayer<B> {
         };
 
         // Gate projections
-        let i = self.igate.forward(x_conv.clone().unsqueeze_dim(1));
-        let f = self.fgate.forward(x_conv.unsqueeze_dim(1));
-        let z = self.zgate.forward(x.clone().unsqueeze_dim(1));
-        let o = self.ogate.forward(x.unsqueeze_dim(1));
+        let i = self.igate.forward(x_conv.clone().unsqueeze_dim::<3>(1));
+        let f = self.fgate.forward(x_conv.unsqueeze_dim::<3>(1));
+        let z = self.zgate.forward(x.clone().unsqueeze_dim::<3>(1));
+        let o = self.ogate.forward(x.unsqueeze_dim::<3>(1));
 
         let gates = Tensor::cat(vec![i, f, z, o], 2).reshape([b, 4 * self.embedding_dim]);
 
         // sLSTM cell step
         let (y, new_cell_state) = self.slstm_cell.step(gates, cell_state);
 
-        let y = self.dropout.forward(y.unsqueeze_dim(1)).reshape([b, self.embedding_dim]);
+        let y = self.dropout.forward(y.unsqueeze_dim::<3>(1)).reshape([b, self.embedding_dim]);
 
         // Group norm
         let y_heads = y

@@ -144,7 +144,7 @@ impl<B: Backend> XLSTMBlock<B> {
 
         // Optional FFN (FFN is stateless in this context, just a feedforward)
         if let (Some(ffn_norm), Some(ffn)) = (&self.ffn_norm, &self.ffn) {
-            let x_ffn = ffn.forward(ffn_norm.forward(x.unsqueeze_dim(1))).reshape(x.dims());
+            let x_ffn = ffn.forward(ffn_norm.forward(x.clone().unsqueeze_dim::<3>(1))).reshape(x.dims());
             x_out = x + x_ffn;
         }
 

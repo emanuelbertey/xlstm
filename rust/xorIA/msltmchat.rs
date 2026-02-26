@@ -2,15 +2,15 @@
 
 /*!
 Text Generation with xLSTM using Character-Level Tokenization
-Updated to use the new xLSTM Rust port.
+Updated to use the new xLSTM Rust port with mLSTM and sLSTM blocks.
 */
 
 use burn::optim::decay::WeightDecayConfig;
 use burn::{
-    module::Module,
-    optim::AdamConfig,
+    module::{AutodiffModule, Module},
+    optim::{AdamConfig, Optimizer, GradientsParams},
     record::{CompactRecorder, Recorder},
-    tensor::{activation::softmax, Tensor, backend::{AutodiffBackend, Backend}, Int},
+    tensor::{activation::softmax, Tensor, backend::Backend, Int},
     nn::loss::CrossEntropyLossConfig,
 };
 use burn::grad_clipping::GradientClippingConfig;
@@ -28,7 +28,7 @@ use tokenizers::pre_tokenizers::metaspace::{Metaspace, PrependScheme};
 use tokenizers::tokenizer::Tokenizer as HFTokenizer;
 use tokenizers::models::TrainerWrapper;
 
-use xlstm::{LearningRateConfig, LstmType, XLstm, XLstmConfig, XLstmState};
+use xlstm::{XLstm, XLstmConfig};
 use xlstm::xlstm_block_stack::XLSTMBlockStackConfig;
 use xlstm::blocks::mlstm::block::MLSTMBlockConfig;
 use xlstm::blocks::mlstm::layer::MLSTMLayerConfig;
@@ -36,9 +36,10 @@ use xlstm::blocks::slstm::block::SLSTMBlockConfig;
 use xlstm::blocks::slstm::layer::SLSTMLayerConfig;
 use xlstm::components::feedforward::GatedFeedForwardConfig;
 
+// Use NdArray backend with Autodiff
 type MyBackend = Autodiff<NdArray<f32>>;
 
-/// Tokenizador profesional usando la librería 'tokenizers' de Hugging Face
+/// Professional Tokenizer using Hugging Face 'tokenizers'
 pub struct Tokenizer {
     tokenizer: HFTokenizer,
 }
@@ -100,6 +101,7 @@ impl Tokenizer {
     }
 }
 
+/// Create training batch (B, S)
 fn create_batch<B: Backend>(
     tokens: &[usize],
     start_idx: usize,
@@ -132,6 +134,7 @@ fn create_batch<B: Backend>(
     (x, y)
 }
 
+/// Stochastic sampling with Top-K, Top-P (Nucleus) and temperature
 fn sample_from_logits<B: Backend>(
     logits: Tensor<B, 2>, 
     temperature: f32,
@@ -185,29 +188,32 @@ fn sample_from_logits<B: Backend>(
     indices[0]
 }
 
+/// Stateful text generation
 fn generate_text<B: Backend>(
     model: &XLstm<B>,
     tokenizer: &Tokenizer,
     seed_text: &str,
     length: usize,
     device: &B::Device,
-) -> String {
-    let mut generated_ids = tokenizer.encode(seed_text);
-    if generated_ids.is_empty() {
-        generated_ids.push(0);
+) -> (String, usize, f32) {
+    let seed_ids = tokenizer.encode(seed_text);
+    if seed_ids.is_empty() {
+        return (seed_text.to_string(), 0, 0.0);
     }
     
+    let start_time = Instant::now();
     let mut current_state = model.empty_state(1, device);
+    let mut last_id = 0;
 
     // Warm up state with seed
-    for &id in &generated_ids {
+    for &id in &seed_ids {
         let input = Tensor::<B, 1, Int>::from_data(TensorData::new(vec![id as i64], [1]), device);
-        let (_, next_state) = model.step(input, current_state);
+        let (_logits, next_state) = model.step(input, current_state);
         current_state = next_state;
+        last_id = id;
     }
 
     let mut result_ids = Vec::new();
-    let mut last_id = *generated_ids.last().unwrap();
 
     for _ in 0..length {
         let input = Tensor::<B, 1, Int>::from_data(TensorData::new(vec![last_id as i64], [1]), device);
@@ -217,12 +223,21 @@ fn generate_text<B: Backend>(
         let next_token = sample_from_logits(logits, 0.4, 40, 0.9);
         result_ids.push(next_token);
         last_id = next_token;
+        
+        if let Some(t) = tokenizer.id_to_token(next_token) {
+             if t.contains('Ċ') { break; }
+        }
     }
 
-    tokenizer.decode(&result_ids)
+    let elapsed = start_time.elapsed().as_secs_f32();
+    let text = tokenizer.decode(&result_ids);
+    (text, result_ids.len(), elapsed)
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    println!("xLSTM Text Generation - Migrated to new Rust port");
+    println!("================================================\n");
+
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!("Uso: cargo run --bin msltmchat -- <archivo.txt>");
@@ -233,24 +248,32 @@ fn main() -> Result<(), Box<dyn Error>> {
     let tokenizer_path = "tokenizer.json";
     let model_path = "xlstm_chat_model"; 
 
-    let target_vocab_size = 1024;
+    // Load or create tokenizer
+    let target_vocab_size = 2048;
     let tokenizer = if Path::new(tokenizer_path).exists() {
+        println!("Cargando tokenizador existente...");
         Tokenizer::load(tokenizer_path)?
     } else {
+        println!("Entrenando nuevo tokenizador BPE...");
         let text = fs::read_to_string(text_file)?;
         let tokenizer = Tokenizer::from_text(&text, target_vocab_size)?;
         tokenizer.save(tokenizer_path)?;
         tokenizer
     };
 
+    let vocab_size = tokenizer.vocab_size();
+    println!("Tamaño del vocabulario: {}\n", vocab_size);
+
     let text = fs::read_to_string(text_file)?;
     let tokens = tokenizer.encode(&text);
-    let vocab_size = tokenizer.vocab_size();
-    let embedding_dim = 128;
-    let num_blocks = 4;
-    let seq_length = 64;
-    let batch_size = 8;
-    let num_epochs = 20;
+    println!("Tokens totales: {}\n", tokens.len());
+
+    // Model configuration
+    let embedding_dim = 256;
+    let num_blocks = 3;
+    let seq_length = 256;
+    let batch_size = 16;
+    let num_epochs = 50;
 
     let device = Default::default();
 
@@ -263,7 +286,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             proj_factor: 2.0,
             bias: true,
             dropout: 0.1,
-            context_length: 128,
+            context_length: seq_length,
         },
     };
 
@@ -288,64 +311,159 @@ fn main() -> Result<(), Box<dyn Error>> {
         block_stack: XLSTMBlockStackConfig {
             embedding_dim,
             num_blocks,
-            context_length: 128,
+            context_length: seq_length,
             add_post_blocks_norm: true,
             bias: true,
             dropout: 0.1,
             mlstm_block: Some(mlstm_cfg),
             slstm_block: Some(slstm_cfg),
-            slstm_at: vec![1, 3],
+            slstm_at: vec![],
         },
     };
 
     let model_file = format!("{}.mpk", model_path);
-    let mut model: xlstm::XLstm<MyBackend> = if Path::new(&model_file).exists() {
-        println!("Cargando modelo...");
+    let existe_modelo = Path::new(&model_file).exists();
+    
+    let mut modo_inferencia = false;
+    if existe_modelo {
+        print!("¡Modelo encontrado! ¿Deseas (e)ntrenar o (i)nferir solamente? [e/i]: ");
+        io::stdout().flush()?;
+        let mut choice = String::new();
+        io::stdin().read_line(&mut choice)?;
+        if choice.trim().to_lowercase() == "i" {
+            modo_inferencia = true;
+        }
+    }
+
+    let mut model: xlstm::XLstm<MyBackend> = if existe_modelo {
+        println!("Cargando pesos del modelo...");
         let recorder = CompactRecorder::new();
         let record = recorder.load(model_file.into(), &device)?;
         config.init(&device).load_record(record)
     } else {
-        println!("Iniciando entrenamiento desde cero...");
+        println!("Iniciando nuevo modelo desde cero...\n");
         config.init(&device)
     };
 
-    let mut optim = AdamConfig::new()
-        .with_weight_decay(Some(WeightDecayConfig::new(1e-5)))
-        .with_grad_clipping(Some(GradientClippingConfig::Norm(1.0)))
-        .init();
+    if !modo_inferencia {
+        let mut optim = AdamConfig::new()
+            .with_weight_decay(Some(WeightDecayConfig::new(1e-5)))
+            .with_grad_clipping(Some(GradientClippingConfig::Norm(0.5)))
+            .init();
 
-    let loss_fn = CrossEntropyLossConfig::new().init(&device);
-    let num_sequences = tokens.len().saturating_sub(seq_length + 1);
-    let num_batches = num_sequences / (batch_size * seq_length);
+        let loss_fn = CrossEntropyLossConfig::new().init(&device);
+        let tokens_per_batch = batch_size * seq_length;
+        let num_batches = tokens.len() / tokens_per_batch;
 
-    for epoch in 0..num_epochs {
-        let mut total_loss = 0.0;
-        for batch_idx in 0..num_batches {
-            let start_idx = batch_idx * batch_size * seq_length;
-            let (input, targets) = create_batch::<MyBackend>(&tokens, start_idx, batch_size, seq_length, &device);
+        println!("Entrenando con {} batches por época (Stride optimizado)\n", num_batches);
 
-            let logits = model.forward(input);
-            let logits_flat = logits.reshape([batch_size * seq_length, vocab_size]);
-            let targets_flat = targets.reshape([batch_size * seq_length]);
+        let total_start = Instant::now();
 
-            let loss = loss_fn.forward(logits_flat, targets_flat);
-            total_loss += loss.clone().into_data().as_slice::<f32>().unwrap()[0];
+        for epoch in 0..num_epochs {
+            let epoch_start = Instant::now();
+            let mut total_loss = 0.0;
+            
+            for batch_idx in 0..num_batches {
+                let start_idx = batch_idx * tokens_per_batch;
+                
+                // Sequential batching for stability on CPU
+                let mut x_indices = Vec::with_capacity(tokens_per_batch);
+                let mut y_indices = Vec::with_capacity(tokens_per_batch);
+                for i in 0..batch_size {
+                    let base = start_idx + i * seq_length;
+                    for j in 0..seq_length {
+                        let idx = (base + j) % tokens.len();
+                        let next_idx = (base + j + 1) % tokens.len();
+                        x_indices.push(tokens[idx] as i64);
+                        y_indices.push(tokens[next_idx] as i64);
+                    }
+                }
+                let input = Tensor::<MyBackend, 2, Int>::from_data(TensorData::new(x_indices, [batch_size, seq_length]), &device);
+                let targets = Tensor::<MyBackend, 2, Int>::from_data(TensorData::new(y_indices, [batch_size, seq_length]), &device);
 
-            let grads = loss.backward();
-            let lr = 1e-3;
-            model = model.optimizer_step(lr, &mut optim, grads);
+                let logits = model.forward(input);
+                let [b, s, v] = logits.dims();
+                
+                let logits_flat = logits.reshape([b * s, v]);
+                let targets_flat = targets.reshape([b * s]);
 
-            if batch_idx % 10 == 0 {
-                print!("\rEpoch {}/{} Batch {}/{} Loss: {:.4}", epoch+1, num_epochs, batch_idx, num_batches, total_loss / (batch_idx+1) as f32);
-                io::stdout().flush()?;
+                let loss = loss_fn.forward(logits_flat, targets_flat);
+                total_loss += loss.clone().into_data().as_slice::<f32>().unwrap()[0];
+
+                let grads = loss.backward();
+                let grads = GradientsParams::from_grads(grads, &model);
+                
+                let lr = 1e-4; 
+                model = optim.step(lr, model, grads);
+
+                if batch_idx % 5 == 0 || batch_idx == num_batches - 1 {
+                    let elapsed_total = total_start.elapsed().as_secs_f32();
+                    let batches_done = epoch * num_batches + batch_idx + 1;
+                    let total_batches = num_epochs * num_batches;
+                    let tps = (batches_done * tokens_per_batch) as f32 / elapsed_total;
+                    
+                    let remaining_batches = total_batches.saturating_sub(batches_done);
+                    let eta_min = (remaining_batches * tokens_per_batch) as f32 / tps / 60.0;
+
+                    print!("\r  Epoch [{}/{}] Batch [{}/{}] Loss: {:.4} | Speed: {:.1} tok/s | Total ETA: {:.1}h", 
+                        epoch+1, num_epochs, batch_idx+1, num_batches, total_loss / (batch_idx+1) as f32, tps, eta_min / 60.0);
+                    io::stdout().flush()?;
+                }
+            }
+
+            println!("\n  Epoch completada en {:.2}s. Generando ejemplo...", epoch_start.elapsed().as_secs_f32());
+            let (generated, _, _) = generate_text(&model.valid(), &tokenizer, "El ", 64, &device);
+            println!("  Generado: {}\n", generated);
+
+            let recorder = CompactRecorder::new();
+            model.clone().save_file(model_path, &recorder)?;
+        }
+        println!("\n¡Entrenamiento completado!");
+    } else {
+        println!("Entrando en modo de inferencia pura.\n");
+    }
+
+    // Interactive Loop
+    println!("\n╔════════════════════════════════════════════════════════╗");
+    println!("║        MODO INTERACTIVO - GENERACIÓN DE TEXTO         ║");
+    println!("╚════════════════════════════════════════════════════════╝\n");
+    println!("Comandos:");
+    println!("  - Escribe tu semilla para generar texto.");
+    println!("  - 'len <n>': Cambia la cantidad de tokens a generar.");
+    println!("  - 'salir' o 'exit' para terminar.\n");
+
+    let mut current_len = 200;
+
+    loop {
+        print!("Semilla [len: {}] > ", current_len);
+        io::stdout().flush()?;
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let input = input.trim();
+
+        if input.eq_ignore_ascii_case("salir") || input.eq_ignore_ascii_case("exit") {
+            break;
+        }
+
+        if input.to_lowercase().starts_with("len ") {
+            if let Ok(new_len) = input[4..].trim().parse::<usize>() {
+                current_len = new_len;
+                println!("  -> Longitud cambiada a: {} tokens.\n", current_len);
+                continue;
             }
         }
-        println!("\nEpoch {} completa. Generando...", epoch+1);
-        let generated = generate_text(&model.valid(), &tokenizer, "El ", 50, &device);
-        println!("Generado: {}", generated);
 
-        let recorder = CompactRecorder::new();
-        model.clone().save_file(model_path, &recorder)?;
+        if input.is_empty() {
+            continue;
+        }
+
+        let (generated, tokens_count, elapsed) = generate_text(&model.valid(), &tokenizer, input, current_len, &device);
+        let tps = tokens_count as f32 / elapsed;
+        
+        println!("\n--- TEXTO GENERADO ---");
+        println!("{}", generated);
+        println!("----------------------");
+        println!("Tokens: {} | Tiempo: {:.2}s | Velocidad: {:.2} tok/s\n", tokens_count, elapsed, tps);
     }
 
     Ok(())

@@ -170,7 +170,7 @@ impl<B: Backend> XLSTMBlockStack<B> {
         }
 
         if let Some(norm) = &self.post_blocks_norm {
-            x = norm.forward(x.unsqueeze_dim::<3>(1)).reshape(x.dims());
+            x = norm.forward(x.clone().unsqueeze_dim::<3>(1)).reshape(x.dims());
         }
 
         (x, XLSTMBlockStackState { block_states: new_block_states })

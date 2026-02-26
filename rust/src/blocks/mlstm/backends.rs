@@ -167,6 +167,7 @@ fn max_tensor<B: Backend, const D: usize>(a: Tensor<B, D>, b: Tensor<B, D>) -> T
 
 /// Cumulative sum along dimension 2 for a 4D tensor.
 /// Burn doesn't have cumsum so we do it manually.
+/*
 fn cumsum_dim2<B: Backend>(x: Tensor<B, 4>, len: usize) -> Tensor<B, 4> {
     let [b, nh, _s, d] = x.dims();
     let device = x.device();
@@ -181,6 +182,19 @@ fn cumsum_dim2<B: Backend>(x: Tensor<B, 4>, len: usize) -> Tensor<B, 4> {
         result = result.slice_assign([0..b, 0..nh, t..t+1, 0..d], running.clone());
     }
     result
+}
+*/
+fn cumsum_dim2<B: Backend>(x: Tensor<B, 4>, len: usize) -> Tensor<B, 4> {
+    let [_b, _nh, _s, _d] = x.dims();
+    let device = x.device();
+    
+    // Create lower triangular matrix of 1s: (len, len)
+    let mask = lower_triangular_bool::<B>(len, &device);
+    let l_matrix = Tensor::<B, 2>::zeros([len, len], &device).mask_where(mask, Tensor::ones([len, len], &device));
+    
+    // matmul broadcast: (1, 1, L, L) @ (B, NH, L, D) -> (B, NH, L, D)
+    // We must unsqueeze incrementally: 2D -> 3D -> 4D
+    l_matrix.unsqueeze_dim::<3>(0).unsqueeze_dim::<4>(0).matmul(x)
 }
 
 /// Lower triangular boolean mask of size (S, S).
