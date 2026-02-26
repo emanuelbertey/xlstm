@@ -134,12 +134,14 @@ fn create_batch<B: Backend>(
     (x, y)
 }
 
-/// Stochastic sampling with Top-K, Top-P (Nucleus) and temperature
+/// Stochastic sampling with Top-K, Top-P, Temperature and Repetition Penalty
 fn sample_from_logits<B: Backend>(
     logits: Tensor<B, 2>, 
     temperature: f32,
     top_k: usize,
-    top_p: f32
+    top_p: f32,
+    repetition_penalty: f32,
+    previous_tokens: &[usize],
 ) -> usize {
     let probs = softmax(logits, 1);
     let mut probs_vec: Vec<(usize, f32)> = probs.to_data()
@@ -149,6 +151,15 @@ fn sample_from_logits<B: Backend>(
         .enumerate()
         .map(|(i, &x)| (i, x))
         .collect();
+
+    // Aplicar penalización de repetición
+    if repetition_penalty != 1.0 {
+        for (id, prob) in probs_vec.iter_mut() {
+            if previous_tokens.contains(id) {
+                *prob /= repetition_penalty;
+            }
+        }
+    }
 
     probs_vec.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     
@@ -204,29 +215,42 @@ fn generate_text<B: Backend>(
     let start_time = Instant::now();
     let mut current_state = model.empty_state(1, device);
     let mut last_id = 0;
+    let mut last_logits = None;
 
     // Warm up state with seed
     for &id in &seed_ids {
         let input = Tensor::<B, 1, Int>::from_data(TensorData::new(vec![id as i64], [1]), device);
-        let (_logits, next_state) = model.step(input, current_state);
+        let (logits, next_state) = model.step(input, current_state);
         current_state = next_state;
         last_id = id;
+        last_logits = Some(logits);
     }
 
     let mut result_ids = Vec::new();
+    let mut history = seed_ids.clone();
+
+    // Parámetros limpios para evitar que se rompan las palabras con vocab=2048
+    let temp = 0.4;
+    let top_k = 20;
+    let top_p = 1.0;
+    let r_penalty = 1.0; // Apagado
+
+    // Primer token: samplear desde los logits del último paso
+    let mut next_id = if let Some(logits) = last_logits {
+        sample_from_logits(logits, temp, top_k, top_p, r_penalty, &history)
+    } else {
+        0
+    };
 
     for _ in 0..length {
-        let input = Tensor::<B, 1, Int>::from_data(TensorData::new(vec![last_id as i64], [1]), device);
+        result_ids.push(next_id);
+        history.push(next_id);
+        if history.len() > 64 { history.remove(0); }
+
+        let input = Tensor::<B, 1, Int>::from_data(TensorData::new(vec![next_id as i64], [1]), device);
         let (logits, next_state) = model.step(input, current_state);
         current_state = next_state;
-
-        let next_token = sample_from_logits(logits, 0.7, 40, 0.9);
-        result_ids.push(next_token);
-        last_id = next_token;
-        
-        if let Some(t) = tokenizer.id_to_token(next_token) {
-             if t.contains('Ċ') { break; }
-        }
+        next_id = sample_from_logits(logits, temp, top_k, top_p, r_penalty, &history);
     }
 
     let elapsed = start_time.elapsed().as_secs_f32();
@@ -269,11 +293,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("Tokens totales: {}\n", tokens.len());
 
     // Model configuration (Optimized for 1 block as requested)
-    let embedding_dim = 256;
+    let embedding_dim = 320;
     let num_blocks = 2;
     let seq_length = 256;
     let batch_size = 16;
-    let num_epochs = 0;
+    let num_epochs = 5;
 
     let device = WgpuDevice::default();
 
@@ -326,12 +350,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     
     let mut modo_inferencia = false;
     if existe_modelo {
-        print!("¡Modelo GPU encontrado! ¿Deseas (e)ntrenar o (i)nferir solamente? [e/i]: ");
-        io::stdout().flush()?;
-        let mut choice = String::new();
-        io::stdin().read_line(&mut choice)?;
-        if choice.trim().to_lowercase() == "i" {
-            modo_inferencia = true;
+        // Drenar cualquier byte residual en stdin (típico al lanzar con `cargo run` en Windows)
+        loop {
+            print!("¡Modelo GPU encontrado! ¿Deseas (e)ntrenar o (i)nferir solamente? [e/i]: ");
+            io::stdout().flush()?;
+            let mut choice = String::new();
+            io::stdin().read_line(&mut choice)?;
+            let choice = choice.trim().to_lowercase();
+            match choice.as_str() {
+                "i" => { modo_inferencia = true; break; }
+                "e" => { break; }
+                _ => {
+                    // Si llegó vacío o con basura (residuo de cargo run), reintentar
+                    if choice.is_empty() {
+                        continue;
+                    }
+                    println!("  → Opción no reconocida '{}'. Por favor escribe 'e' o 'i'.", choice);
+                }
+            }
         }
     }
 
@@ -380,7 +416,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let grads = loss.backward();
                 let grads = GradientsParams::from_grads(grads, &model);
                 
-                let lr = 5e-4; // GPU can usually handle a bit higher LR than CPU for stable training
+                let lr = 1e-3; // GPU can usually handle a bit higher LR than CPU for stable training
                 model = optim.step(lr, model, grads);
 
                 if batch_idx % 5 == 0 || batch_idx == num_batches - 1 {
@@ -392,8 +428,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let remaining_batches = total_batches.saturating_sub(batches_done);
                     let eta_min = (remaining_batches * tokens_per_batch) as f32 / tps / 60.0;
 
-                    print!("\r  Epoch [{}/{}] Batch [{}/{}] Loss: {:.4} | Speed: {:.1} tok/s | Total ETA: {:.1}h", 
-                        epoch+1, num_epochs, batch_idx+1, num_batches, total_loss / (batch_idx+1) as f32, tps, eta_min / 60.0);
+                    let batch_loss = loss.clone().into_data().as_slice::<f32>().unwrap()[0];
+                    let avg_loss = total_loss / (batch_idx + 1) as f32;
+
+                    println!("  Epoch [{}/{}] Batch [{}/{}] Loss Batch: {:.4} | Avg: {:.4} | Speed: {:.1} tok/s | Total ETA: {:.1}h", 
+                        epoch+1, num_epochs, batch_idx+1, num_batches, batch_loss, avg_loss, tps, eta_min / 60.0);
                     io::stdout().flush()?;
                 }
             }
