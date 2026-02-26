@@ -76,17 +76,11 @@ impl<B: Backend> LinearHeadwiseExpand<B> {
         let in_per_head = self.in_features / self.num_heads;
         let out_per_head = self.out_features / self.num_heads;
 
-        // (B, S, F) → (B, S, NH, in_per_head) → (B, NH, S, in_per_head)
         let x = x.reshape([b, s, self.num_heads, in_per_head]).swap_dims(1, 2);
 
-        // For each head h: out[b,h,s,:] = x[b,h,s,:] @ weight[h].T
-        // weight: (NH, O, I), x: (B, NH, S, I)
-        // We want: (B, NH, S, I) @ (NH, I, O) → (B, NH, S, O) via batched matmul
-        let w = self.weight.val().unsqueeze_dim::<4>(0); // (1, NH, O, I)
-        let w = w.swap_dims(2, 3); // (1, NH, I, O)
-        let out = x.matmul(w); // (B, NH, S, O)
+        let w = self.weight.val().unsqueeze_dim::<4>(0).swap_dims(2, 3); 
+        let out = x.matmul(w); 
 
-        // (B, NH, S, O) → (B, S, NH, O) → (B, S, NH*O)
         let out = out.swap_dims(1, 2).reshape([b, s, self.num_heads * out_per_head]);
 
         if let Some(bias) = &self.bias {

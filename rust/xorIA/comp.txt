@@ -7,3 +7,5 @@ cargo run --release --bin slstmchat -- input.txt
 cargo run --release --bin msltmchat_gpu -- input.txt
 
 cargo run --release --bin mlstm_equivalence 
+
+$env:PYTHONPATH = "."; py tests\mlstm_equivalence.py

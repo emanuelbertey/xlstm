@@ -10,69 +10,68 @@ type AdBackend = Autodiff<TestBackend>;
 fn main() {
     let device = Default::default();
     let batch_size = 1;
-    let seq_len = 1; 
     let embedding_dim = 16;
     
-    println!("--- TEST mLSTM: AISLAMIENTO TOTAL (SEQ_LEN=1) ---");
-    
-    let config = MLSTMLayerConfig {
-        embedding_dim,
-        num_heads: 4,
-        conv1d_kernel_size: 4,
-        qkv_proj_blocksize: 4,
-        proj_factor: 2.0,
-        bias: true,
-        dropout: 0.0,
-        context_length: 128,
-    };
-    
-    let layer_p: MLSTMLayer<AdBackend> = config.init(&device);
-    let mut layer_r = config.init(&device);
-    
-    // Sincronizar pesos (Copiamos de P a R)
-    layer_r.proj_up = layer_p.proj_up.clone();
-    layer_r.q_proj = layer_p.q_proj.clone();
-    layer_r.k_proj = layer_p.k_proj.clone();
-    layer_r.v_proj = layer_p.v_proj.clone();
-    layer_r.conv1d = layer_p.conv1d.clone();
-    layer_r.mlstm_cell = layer_p.mlstm_cell.clone();
-    layer_r.learnable_skip = layer_p.learnable_skip.clone();
-    layer_r.proj_down = layer_p.proj_down.clone();
+    for seq_len in 1..=12 {
+        println!("--- TEST mLSTM: SEQ_LEN={} ---", seq_len);
+        
+        let config = MLSTMLayerConfig {
+            embedding_dim,
+            num_heads: 4,
+            conv1d_kernel_size: 4,
+            qkv_proj_blocksize: 4,
+            proj_factor: 2.0,
+            bias: true,
+            dropout: 0.0,
+            context_length: 128,
+        };
+        
+        // Initialize layers. Load record ensures identical weights with fresh autodiff state.
+        let layer_p: MLSTMLayer<AdBackend> = config.init(&device);
+        let record = layer_p.clone().into_record();
+        let layer_r: MLSTMLayer<AdBackend> = config.init(&device).load_record(record);
 
-    let input_raw = Tensor::<TestBackend, 3>::random([batch_size, seq_len, embedding_dim], Distribution::Normal(0.0, 1.0), &device);
-    
-    // --- PASADA 1: PARALELA ---
-    let input_p = Tensor::<AdBackend, 3>::from_inner(input_raw.clone()).require_grad();
-    let output_p = layer_p.forward(input_p.clone());
-    let grads_p = output_p.clone().sum().backward();
-    
-    let g_w_p = layer_p.proj_up.weight.grad(&grads_p).unwrap();
-    let g_in_p = input_p.grad(&grads_p).unwrap();
+        let input_raw = Tensor::<TestBackend, 3>::random([batch_size, seq_len, embedding_dim], Distribution::Normal(0.0, 1.0), &device);
+        
+        // Parallel pass
+        let input_p = Tensor::<AdBackend, 3>::from_inner(input_raw.clone()).require_grad();
+        let output_p = layer_p.forward(input_p.clone());
+        let grads_p = output_p.clone().sum().backward();
+        
+        let g_w_p = layer_p.proj_up.weight.grad(&grads_p).expect("No grad for parallel weight");
+        let g_in_p = input_p.grad(&grads_p).expect("No grad for parallel input");
 
-    // --- PASADA 2: RECURRENTE ---
-    let input_r = Tensor::<AdBackend, 3>::from_inner(input_raw).require_grad();
-    let state = layer_r.empty_state(batch_size, &device);
-    let x_t = input_r.clone().slice([0..batch_size, 0..1, 0..embedding_dim]).reshape([batch_size, embedding_dim]);
-    
-    let (y_t, _) = layer_r.step(x_t, state);
-    
-    let grads_r = y_t.clone().sum().backward(); // .clone() aquí para poder comparar y_t después
-    let g_w_r = layer_r.proj_up.weight.grad(&grads_r).unwrap();
-    let g_in_r = input_r.grad(&grads_r).unwrap();
+        // Recurrent pass
+        let input_r = Tensor::<AdBackend, 3>::from_inner(input_raw).require_grad();
+        let mut state = layer_r.empty_state(batch_size, &device);
+        let mut steps = Vec::new();
+        
+        for t in 0..seq_len {
+            let x_t = input_r.clone().narrow(1, t, 1).reshape([batch_size, embedding_dim]);
+            let (y_t, next_state) = layer_r.step(x_t, state);
+            steps.push(y_t.unsqueeze_dim::<3>(1));
+            state = next_state;
+        }
+        
+        let output_r = Tensor::cat(steps, 1);
+        let grads_r = output_r.clone().sum().backward();
+        
+        let g_w_r = layer_r.proj_up.weight.grad(&grads_r).expect("No grad for recurrent weight");
+        let g_in_r = input_r.grad(&grads_r).expect("No grad for recurrent input");
 
-    // --- COMPARAR ---
-    let val_diff = (output_p.reshape([batch_size, embedding_dim]) - y_t).abs().mean().into_scalar();
-    let grad_w_diff = (g_w_p - g_w_r).abs().mean().into_scalar();
-    let grad_in_diff = (g_in_p - g_in_r).abs().mean().into_scalar();
+        let val_diff = (output_p - output_r).abs().mean().into_scalar();
+        let grad_w_diff = (g_w_p - g_w_r).abs().mean().into_scalar();
+        let grad_in_diff = (g_in_p - g_in_r).abs().mean().into_scalar();
 
-    println!("Diferencia VALOR:       {:.10}", val_diff);
-    println!("Diferencia GRAD PESO:   {:.10}", grad_w_diff);
-    println!("Diferencia GRAD INPUT:  {:.10}", grad_in_diff);
+        println!("Diferencia VALOR:       {:.10}", val_diff);
+        println!("Diferencia GRAD PESO:   {:.10}", grad_w_diff);
+        println!("Diferencia GRAD INPUT:  {:.10}", grad_in_diff);
 
-    if grad_w_diff < 1e-4 {
-        println!("\n✅ GRADIENTES COINCIDEN EN SEQ_LEN=1");
-    } else {
-        println!("\n❌ ERROR ESTRUCTURAL DETECTADO");
-        std::process::exit(1);
+        if val_diff > 1e-6 || grad_w_diff > 1e-6 {
+            println!("FAILURE: Discrepancy detected at SEQ_LEN={}", seq_len);
+            std::process::exit(1);
+        }
+        println!();
     }
+    println!("ALL TESTS PASSED (1-12)");
 }
