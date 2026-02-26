@@ -35,7 +35,7 @@ impl CausalConv1dConfig {
 
 impl<B: Backend> CausalConv1d<B> {
     pub fn empty_state(&self, batch_size: usize, device: &B::Device) -> Tensor<B, 3> {
-        Tensor::zeros([batch_size, self.kernel_size, self.feature_dim], device)
+        Tensor::zeros([batch_size, self.kernel_size, self.feature_dim], device).require_grad()
     }
 
     pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
@@ -43,7 +43,7 @@ impl<B: Backend> CausalConv1d<B> {
         let device = x.device();
         let padding = self.kernel_size - 1;
         
-        let zeros = Tensor::zeros([b, f, padding], &device);
+        let zeros = Tensor::zeros([b, f, padding], &device).require_grad();
         let x_padded = Tensor::cat(vec![zeros, x.swap_dims(1, 2)], 2);
         
         let y = self.conv.forward(x_padded);
@@ -54,14 +54,11 @@ impl<B: Backend> CausalConv1d<B> {
         let [batch_size, k, f] = state.dims();
         let new_state = Tensor::cat(vec![state.narrow(1, 1, k - 1), x.unsqueeze_dim(1)], 1);
         
-        let weight = self.conv.weight.val().reshape([f, k]).unsqueeze_dim::<3>(0);
+        // Convert [B, Kernel, F] -> [B, F, Kernel]
+        let x_padded = new_state.clone().swap_dims(1, 2);
         
-        let new_state_swapped = new_state.clone().swap_dims(1, 2); 
-        let mut y = (new_state_swapped * weight).sum_dim(2).reshape([batch_size, f]);
+        let mut y = self.conv.forward(x_padded).squeeze(2);
         
-        if let Some(bias) = &self.conv.bias {
-            y = y + bias.val().reshape([1, f]);
-        }
         (y, new_state)
     }
 }

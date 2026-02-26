@@ -36,3 +36,15 @@ path = "src/main.rs"
 [[bin]]
 name = "mlstm_equivalence"
 path = "xorIA/bin/mlstm_equivalence.rs"
+
+
+[[bin]]
+name = "test_cumsum"
+path = "xorIA/bin/test_cumsum.rs"
+
+
+
+[[bin]]
+name = "test_conv"
+path = "xorIA/bin/test_conv.rs"
+

@@ -125,7 +125,7 @@ impl<B: Backend> XLSTMBlock<B> {
         state: XLSTMBlockState<B>,
     ) -> (Tensor<B, 2>, XLSTMBlockState<B>) {
         let x_res = x.clone();
-        let x_normed = self.xlstm_norm.forward(x.unsqueeze_dim(1)).reshape(x_res.dims());
+        let x_normed = self.xlstm_norm.forward(x.unsqueeze_dim::<3>(1)).reshape(x_res.dims());
 
         let (x_xlstm, new_xlstm_state) = match (&self.xlstm, state) {
             (XLSTMLayerType::MLSTM(l), XLSTMBlockState::MLSTM(s)) => {
