@@ -27,8 +27,9 @@ impl CausalConv1dConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> CausalConv1d<B> {
         let pad = self.kernel_size - 1;
         // Depthwise: groups = feature_dim
+        // IMPORTANT: We use padding 0 here and pad manually in forward to ensure causality (left padding only)
         let conv = nn::conv::Conv1dConfig::new(self.feature_dim, self.feature_dim, self.kernel_size)
-            .with_padding(nn::PaddingConfig1d::Explicit(pad))
+            .with_padding(nn::PaddingConfig1d::Valid) // No padding inside Burn conv
             .with_groups(self.feature_dim)
             .with_bias(self.bias)
             .init(device);
@@ -48,28 +49,39 @@ impl<B: Backend> CausalConv1d<B> {
 
     pub fn step(&self, x: Tensor<B, 2>, state: Tensor<B, 3>) -> (Tensor<B, 2>, Tensor<B, 3>) {
         let [_b, k, f] = state.dims();
-        let state_remaining = state.narrow(1, 1, k - 1);
-        let x_expanded = x.clone().unsqueeze_dim(1);
-        let new_state = Tensor::cat(vec![state_remaining, x_expanded], 1);
-        let state_flipped = new_state.clone().swap_dims(1, 2); // (B, F, K)
-        let weight = self.conv.weight.val().reshape([1, f, k]);
-        let mut y = (state_flipped * weight).sum_dim(2).reshape([_b, f]);
+
+        // Roll and update state (copying Python roll behavior)
+        let state_remaining = state.narrow(1, 1, k - 1); // (B, K-1, F)
+        let x_expanded = x.unsqueeze_dim(1); // (B, 1, F)
+        let new_state = Tensor::cat(vec![state_remaining, x_expanded], 1); // (B, K, F)
+
+        // Conv manual: SUM( conv_state * weight )
+        let weight = self.conv.weight.val() // (F, 1, K)
+            .reshape([f, k])
+            .swap_dims(0, 1) // (K, F)
+            .unsqueeze_dim(0); // (1, K, F)
+
+        let mut y = (new_state.clone() * weight).sum_dim(1).reshape([_b, f]);
+
         if let Some(bias) = &self.conv.bias {
-            y = y + bias.val().unsqueeze_dim(0);
+            y = y + bias.val().reshape([1, f]);
         }
         (y, new_state)
     }
 
-    /// Forward: input (B, S, F) → output (B, S, F).
-    /// Applies causal (left-padded) depthwise 1D convolution.
     pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
-        let [_b, s, _f] = x.dims();
-        // (B, S, F) → (B, F, S) for Conv1d
-        let x = x.swap_dims(1, 2);
-        let y = self.conv.forward(x); // (B, F, S + pad)
-        // Trim right padding to maintain causality: take first S elements
-        let y = y.narrow(2, 0, s);
-        // (B, F, S) → (B, S, F)
+        let [b, _s, f] = x.dims();
+        let device = x.device();
+        
+        // Manual left padding for causality: (B, S+pad, F)
+        let left_pad = Tensor::zeros([b, self.pad, f], &device);
+        let x_padded = Tensor::cat(vec![left_pad, x], 1); // (B, S+pad, F)
+        
+        // (B, S+pad, F) -> (B, F, S+pad) for Conv1d
+        let x_conv = x_padded.swap_dims(1, 2);
+        let y = self.conv.forward(x_conv); // (B, F, S) because padding is Valid and kernel=pad+1
+        
+        // (B, F, S) -> (B, S, F)
         y.swap_dims(1, 2)
     }
 }

@@ -1,0 +1,9 @@
+cargo run --release --bin msltmchat -- input.txt
+
+
+
+cargo run --release --bin slstmchat -- input.txt
+
+cargo run --release --bin msltmchat_gpu -- input.txt
+
+cargo run --release --bin mlstm_equivalence 
