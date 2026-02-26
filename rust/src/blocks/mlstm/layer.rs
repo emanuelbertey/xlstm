@@ -144,8 +144,8 @@ impl<B: Backend> MLSTMLayer<B> {
         let dh = self.inner_dim / self.mlstm_cell.num_heads;
         let c = Tensor::zeros([batch_size, self.mlstm_cell.num_heads, dh, dh], device);
         let n = Tensor::zeros([batch_size, self.mlstm_cell.num_heads, dh, 1], device);
-        // Estabilizador m inicializado en -30 para permitir gradientes en Autodiff
-        let m = Tensor::zeros([batch_size, self.mlstm_cell.num_heads, 1, 1], device).sub_scalar(30.0);
+        // Estabilizador m inicializado en 0.0 para coincidir con la implementación oficial de Python
+        let m = Tensor::zeros([batch_size, self.mlstm_cell.num_heads, 1, 1], device);
         let conv = self.conv1d.empty_state(batch_size, device);
         ((c, n, m), conv)
     }

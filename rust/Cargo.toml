@@ -48,3 +48,9 @@ path = "xorIA/bin/test_cumsum.rs"
 name = "test_conv"
 path = "xorIA/bin/test_conv.rs"
 
+
+
+[[bin]]
+name = "slstm_equivalence"
+path = "xorIA/bin/slstm_equivalence.rs"
+

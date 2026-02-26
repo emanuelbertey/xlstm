@@ -137,8 +137,8 @@ impl<B: Backend> MLSTMCell<B> {
             None => {
                 let c = Tensor::zeros([b, self.num_heads, dh, dh], &device);
                 let n = Tensor::zeros([b, self.num_heads, dh, 1], &device);
-                // Sincronizado con MLSTMLayer: -30.0 para estabilidad de gradiente
-                let m = Tensor::zeros([b, self.num_heads, 1, 1], &device).sub_scalar(30.0);
+                // Sincronizado con Python: 0.0 corregido (antes -30.0)
+                let m = Tensor::zeros([b, self.num_heads, 1, 1], &device);
                 (c, n, m)
             }
         };
