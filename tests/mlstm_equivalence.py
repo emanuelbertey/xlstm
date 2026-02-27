@@ -1,3 +1,5 @@
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
 import torch
 import torch.nn as nn
 from xlstm.blocks.mlstm.layer import mLSTMLayer, mLSTMLayerConfig

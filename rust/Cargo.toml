@@ -54,3 +54,33 @@ path = "xorIA/bin/test_conv.rs"
 name = "slstm_equivalence"
 path = "xorIA/bin/slstm_equivalence.rs"
 
+
+
+[[bin]]
+name = "pro_trainer"
+path = "xorIA/pro_trainer.rs"
+
+
+
+[[bin]]
+name = "mlstm_stability"
+path = "xorIA/bin/mlstm_stability.rs"
+
+
+
+[[bin]]
+name = "mlstm_grad_stability"
+path = "xorIA/bin/mlstm_grad_stability.rs"
+
+
+
+[[bin]]
+name = "mlstm_copy_test"
+path = "xorIA/bin/mlstm_copy_test.rs"
+
+
+
+[[bin]]
+name = "burn_comparison"
+path = "xorIA/bin/burn_device_comparison.rs"
+

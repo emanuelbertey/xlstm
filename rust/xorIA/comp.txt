@@ -8,6 +8,16 @@ cargo run --release --bin msltmchat_gpu -- input.txt
 
 cargo run --release --bin mlstm_equivalence 
 
+cargo run --release --bin mlstm_copy_test
+
 $env:PYTHONPATH = "."; py tests\mlstm_equivalence.py
 
 $env:PYTHONPATH = "."; py tests\test_conv.py
+
+$env:PYTHONPATH = "."; py tests\mlstm_copy_test.py
+
+$env:PYTHONPATH = "."; py tests\mlstm_grad_stability.py
+
+$env:PYTHONPATH = "."; py tests\mlstm_stability_test.py
+
+$env:RUST_BACKTRACE=1; cargo run --release --bin pro_trainer -- "C:/Repos/"

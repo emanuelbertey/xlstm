@@ -1,10 +1,11 @@
 #![recursion_limit = "256"]
 
 /*!
-xLSTM Pro Trainer - High Performance Data Streaming
+xLSTM Pro Trainer - High Performance Data Streaming with WGPU
     
 This tool is designed to train xLSTM models on large datasets (directories, 
 multiple file formats, and gigabyte-sized files) without exhausting RAM.
+Updated to use the new mLSTM architecture with 2 blocks on GPU.
 */
 
 use burn::grad_clipping::GradientClippingConfig;
@@ -12,28 +13,35 @@ use burn::optim::decay::WeightDecayConfig;
 use burn::{
     module::AutodiffModule,
     module::Module,
-    optim::AdamConfig,
+    optim::{AdamConfig, Optimizer, GradientsParams},
     record::{CompactRecorder, Recorder},
-    tensor::{activation::softmax, Tensor, backend::{AutodiffBackend, Backend}},
+    tensor::{activation::softmax, Tensor, backend::Backend, Int},
     nn::loss::CrossEntropyLossConfig,
 };
 use burn::tensor::TensorData;
 use burn_autodiff::Autodiff;
+use burn_wgpu::{Wgpu, WgpuDevice};
 use std::error::Error;
 use std::fs;
 use std::io::{self, Write, Read, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use burn_ndarray::NdArray;
 use tokenizers::pre_tokenizers::byte_level::ByteLevel;
 use tokenizers::decoders::byte_level::ByteLevel as ByteLevelDecoder;
 use tokenizers::models::bpe::{BpeTrainerBuilder, BPE};
 use tokenizers::tokenizer::Tokenizer as HFTokenizer;
 use tokenizers::models::TrainerWrapper;
-use xlstm::{LearningRateConfig, LstmType, XLstm, XLstmconfig, BlockType};
+use xlstm::{XLstm, XLstmConfig};
+use xlstm::xlstm_block_stack::XLSTMBlockStackConfig;
+use xlstm::blocks::mlstm::block::MLSTMBlockConfig;
+use xlstm::blocks::mlstm::layer::MLSTMLayerConfig;
+use xlstm::blocks::slstm::block::SLSTMBlockConfig;
+use xlstm::blocks::slstm::layer::SLSTMLayerConfig;
+use xlstm::components::feedforward::GatedFeedForwardConfig;
 use std::collections::HashSet;
 
-type MyBackend = Autodiff<NdArray<f32>>;
+// backend con autodiff y wgpu
+type MyBackend = Autodiff<Wgpu<f32, i32>>;
 
 /// Professional BPE Tokenizer
 pub struct Tokenizer {
@@ -58,13 +66,13 @@ impl Tokenizer {
         let trainer = BpeTrainerBuilder::default()
             .show_progress(true)
             .vocab_size(vocab_size)
-            .min_frequency(0)
+            .min_frequency(2)
             .initial_alphabet(ByteLevel::alphabet().into_iter().collect::<HashSet<_>>())
             .special_tokens(vec![tokenizers::AddedToken::from(special_token, true)])
             .build();
 
         let mut trainer_wrapper = TrainerWrapper::from(trainer);
-        let temp_file = "temp_train_pro.txt";
+        let temp_file = "temp_train_pro_gpu.txt";
         fs::write(temp_file, text)?;
         tokenizer.train_from_files(&mut trainer_wrapper, vec![temp_file.to_string()])
             .map_err(|e| format!("Error in training: {}", e))?;
@@ -174,42 +182,33 @@ impl Iterator for FileFragmentIterator {
     }
 }
 
-fn create_batch<B: AutodiffBackend>(
+/// Create training batch (B, S)
+fn create_batch<B: Backend>(
     tokens: &[usize],
     start_idx: usize,
     batch_size: usize,
     seq_length: usize,
     stride: usize,
-    vocab_size: usize,
     device: &B::Device,
-) -> (Tensor<B, 3>, Tensor<B, 2, burn::tensor::Int>) {
+) -> (Tensor<B, 2, Int>, Tensor<B, 2, Int>) {
     let mut x_indices = Vec::with_capacity(batch_size * seq_length);
     let mut y_indices = Vec::with_capacity(batch_size * seq_length);
 
     for i in 0..batch_size {
         let current_start = start_idx + i * stride;
-        
-        // RELLENO (PADDING): Si no hay suficientes tokens, rellenamos con ceros (o el último token)
         for j in 0..seq_length {
-            let idx_x = if current_start + j < tokens.len() { tokens[current_start + j] } else { 0 };
-            let idx_y = if current_start + j + 1 < tokens.len() { tokens[current_start + j + 1] } else { 0 };
-            
-            x_indices.push(idx_x as i64);
-            y_indices.push(idx_y as i64);
+            let x_idx = if current_start + j < tokens.len() { tokens[current_start + j] } else { 0 };
+            let y_idx = if current_start + j + 1 < tokens.len() { tokens[current_start + j + 1] } else { 0 };
+            x_indices.push(x_idx as i64);
+            y_indices.push(y_idx as i64);
         }
     }
 
-    let eye = Tensor::<B::InnerBackend, 2>::eye(vocab_size, device);
-    let indices_inner = Tensor::<B::InnerBackend, 1, burn::tensor::Int>::from_data(
-        TensorData::new(x_indices, [batch_size * seq_length]),
+    let x = Tensor::<B, 2, Int>::from_data(
+        TensorData::new(x_indices, [batch_size, seq_length]),
         device,
     );
-
-    let x = Tensor::<B, 3>::from_inner(
-        eye.select(0, indices_inner).reshape([batch_size, seq_length, vocab_size])
-    );
-    
-    let y = Tensor::<B, 2, burn::tensor::Int>::from_data(
+    let y = Tensor::<B, 2, Int>::from_data(
         TensorData::new(y_indices, [batch_size, seq_length]),
         device,
     );
@@ -221,30 +220,31 @@ fn sample_from_logits<B: Backend>(
     logits: Tensor<B, 2>, 
     temperature: f32,
     top_k: usize,
-    top_p: f32
-) -> usize
-where
-    <B as Backend>::FloatElem: num_traits::ToPrimitive,
-{
+    top_p: f32,
+    repetition_penalty: f32,
+    previous_tokens: &[usize],
+) -> usize {
     let probs = softmax(logits, 1);
     let mut probs_vec: Vec<(usize, f32)> = probs.to_data()
-        .as_slice::<<B as Backend>::FloatElem>()
+        .as_slice::<f32>()
         .unwrap()
         .iter()
         .enumerate()
-        .map(|(i, &x)| (i, num_traits::ToPrimitive::to_f32(&x).unwrap_or(0.0)))
+        .map(|(i, &x)| (i, x))
         .collect();
+
+    if repetition_penalty != 1.0 {
+        for (id, prob) in probs_vec.iter_mut() {
+            if previous_tokens.contains(id) {
+                *prob /= repetition_penalty;
+            }
+        }
+    }
 
     probs_vec.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     
-    // Check for NaNs
-    if probs_vec.iter().any(|(_, p)| p.is_nan()) {
-        return 0; // Fallback safety
-    }
-
     let k = top_k.min(probs_vec.len()).max(1);
-    let mut filtered_probs: Vec<(usize, f32)> = Vec::with_capacity(k);
-    
+    let mut filtered_probs = Vec::with_capacity(k);
     let mut cumulative_prob = 0.0;
     for (i, p) in probs_vec.into_iter() {
         filtered_probs.push((i, p));
@@ -268,12 +268,10 @@ where
     let mut rng = rand::rng(); 
     let sample: f32 = rng.random::<f32>() * sum; 
     let mut cumulative = 0.0;
-
     for (i, &p) in weights.iter().enumerate() {
         cumulative += p;
         if sample <= cumulative { return indices[i]; }
     }
-
     indices[0]
 }
 
@@ -282,58 +280,57 @@ fn generate_text<B: Backend>(
     tokenizer: &Tokenizer,
     seed_text: &str,
     length: usize,
-    vocab_size: usize,
     device: &B::Device,
-) -> String
-where
-    <B as Backend>::FloatElem: num_traits::ToPrimitive + num_traits::FromPrimitive,
-{
-    let mut generated_ids = tokenizer.encode(seed_text);
-    let seed_tokens = generated_ids.clone();
-    if seed_tokens.is_empty() { return seed_text.to_string(); }
+) -> String {
+    let seed_ids = tokenizer.encode(seed_text);
+    if seed_ids.is_empty() { return seed_text.to_string(); }
 
-    let eye = Tensor::<B, 2>::eye(vocab_size, device);
-    let mut current_state = None; 
-    let mut current_tokens = seed_tokens.clone();
+    let mut current_state = model.empty_state(1, device);
+    let mut last_id = 0;
+    let mut last_logits = None;
 
-    let eof_id = tokenizer.token_to_id("<|endoftext|>");
-
-    for i in 0..length {
-        let tokens_to_process = if i == 0 { current_tokens.clone() } else { vec![*current_tokens.last().unwrap()] };
-        let seq_len = tokens_to_process.len();
-        let indices = Tensor::<B, 1, burn::tensor::Int>::from_data(
-            TensorData::new(tokens_to_process.iter().map(|&t| t as i64).collect(), [seq_len]),
-            device,
-        );
-
-        let input = eye.clone().select(0, indices).reshape([1, seq_len, vocab_size]);
-        
-        //        let (output, next_state) = model.forward(input, current_state);// Usamos la nueva función independiente para refinamiento en generación
-        let (output, next_state) = model.forward(input, current_state);
-        current_state = Some(next_state);
-
-        let dims = output.dims();
-        let last_logits = output.slice([0..1, (dims[1] - 1)..dims[1], 0..dims[2]]).reshape([1, dims[2]]);
-        
-        let next_token = sample_from_logits(last_logits, 0.7, 40, 0.9);
-
-        if Some(next_token) == eof_id {
-             println!("======= <|endoftext|> ======\n");
-             println!("Tokens generados: {}\n", i);
-            break;
-        }
-
-        current_tokens.push(next_token);
-        generated_ids.push(next_token);
+    for &id in &seed_ids {
+        let input = Tensor::<B, 1, Int>::from_data(TensorData::new(vec![id as i64], [1]), device);
+        let (logits, next_state) = model.step(input, current_state);
+        current_state = next_state;
+        last_id = id;
+        last_logits = Some(logits);
     }
 
-    tokenizer.decode(&generated_ids[seed_tokens.len()..])
+    let mut result_ids = Vec::new();
+    let mut history = seed_ids.clone();
+
+    let temp = 0.7;
+    let top_k = 40;
+    let top_p = 0.9;
+    let r_penalty = 1.1;
+
+    let mut next_id = if let Some(logits) = last_logits {
+        sample_from_logits(logits, temp, top_k, top_p, r_penalty, &history)
+    } else {
+        last_id
+    };
+
+    for _ in 0..length {
+        if let Some(token) = tokenizer.id_to_token(next_id) {
+            if token == "<|endoftext|>" { break; }
+        }
+        result_ids.push(next_id);
+        history.push(next_id);
+        if history.len() > 128 { history.remove(0); }
+
+        let input = Tensor::<B, 1, Int>::from_data(TensorData::new(vec![next_id as i64], [1]), device);
+        let (logits, next_state) = model.step(input, current_state);
+        current_state = next_state;
+        next_id = sample_from_logits(logits, temp, top_k, top_p, r_penalty, &history);
+    }
+
+    tokenizer.decode(&result_ids)
 }
 
-
 fn main() -> Result<(), Box<dyn Error>> {
-    println!("xLSTM Pro Trainer - Automatización de Directorios");
-    println!("================================================\n");
+    println!("xLSTM Pro Trainer (WGPU Version)");
+    println!("================================");
 
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
@@ -343,351 +340,177 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let input_path = Path::new(&args[1]);
     let tokenizer_path = "tokenizer_pro.json";
-    let model_path = "xlstm_pro_model";
-    let extensions = ["txt", "gd", /*"html", "cpp", "c", "py", "h","md", */ "gdshader"];
+    let model_base_path = "xlstm_pro_wgpu";
+    let extensions = ["txt", "gd", "gdshader"];
 
     let all_files = if input_path.is_dir() {
-        println!("Explorando directorio: {:?}", input_path);
         find_files(input_path, &extensions)
     } else {
         vec![input_path.to_path_buf()]
     };
 
     if all_files.is_empty() {
-        return Err("No se encontraron archivos válidos (.txt, .gd, .html)".into());
+        return Err("No se encontraron archivos válidos.".into());
     }
     println!("Archivos encontrados: {}", all_files.len());
 
     let target_vocab_size = 4096;
-    let tokenizer_file = Path::new(tokenizer_path);
-    
-    let mut needs_training = true;
-    let mut tokenizer = None;
+    let tokenizer = if Path::new(tokenizer_path).exists() {
+        println!("Cargando tokenizador...");
+        Tokenizer::load(tokenizer_path)?
+    } else {
+        println!("🚀 Entrenando nuevo tokenizador Pro...");
+        let mut sample_text = String::new();
+        for file_path in all_files.iter().take(100) {
+            if let Ok(mut file) = fs::File::open(file_path) {
+                let mut content = String::new();
+                let mut reader = BufReader::new(file).take(512_000);
+                if reader.read_to_string(&mut content).is_ok() {
+                    sample_text.push_str(&content);
+                    sample_text.push_str("<|endoftext|>");
+                }
+            }
+        }
+        let t = Tokenizer::from_text(&sample_text, target_vocab_size)?;
+        t.save(tokenizer_path)?;
+        t
+    };
 
-    if tokenizer_file.exists() {
-        if let Ok(loaded_t) = Tokenizer::load(tokenizer_path) {
-            let current_vocab = loaded_t.vocab_size();
-            if current_vocab >= target_vocab_size {
-                println!("✅ Tokenizador cargado con vocabulario suficiente: {}", current_vocab);
-                tokenizer = Some(loaded_t);
-                needs_training = false;
-            } else {
-                println!("⚠️ Tokenizador existente insuficiente ({} < {}). Re-entrenando...", current_vocab, target_vocab_size);
+    let vocab_size = tokenizer.vocab_size();
+    let embedding_dim = 256;
+    let num_blocks = 2;
+    let seq_length = 256;
+    let batch_size = 16;
+    let stride = 128;
+    let num_epochs = 30;
+
+    let device = WgpuDevice::default();
+
+    let mlstm_cfg = MLSTMBlockConfig {
+        mlstm: MLSTMLayerConfig {
+            embedding_dim,
+            num_heads: 4,
+            conv1d_kernel_size: 4,
+            qkv_proj_blocksize: 4,
+            proj_factor: 2.0,
+            bias: true,
+            dropout: 0.1,
+            context_length: seq_length,
+        },
+    };
+
+    let config = XLstmConfig {
+        vocab_size,
+        add_embedding_dropout: true,
+        block_stack: XLSTMBlockStackConfig {
+            embedding_dim,
+            num_blocks,
+            context_length: seq_length,
+            add_post_blocks_norm: true,
+            bias: true,
+            dropout: 0.1,
+            mlstm_block: Some(mlstm_cfg),
+            slstm_block: None, 
+            slstm_at: vec![], // Solo mLSTM
+        },
+    };
+
+    let model_file = format!("{}.mpk", model_base_path);
+    let existe_modelo = Path::new(&model_file).exists();
+    
+    let mut modo_inferencia = false;
+    if existe_modelo {
+        loop {
+            print!("\n¡Modelo GPU encontrado! ¿Deseas (e)ntrenar o (i)nferir solamente? [e/i]: ");
+            io::stdout().flush()?;
+            let mut choice = String::new();
+            io::stdin().read_line(&mut choice)?;
+            let choice = choice.trim().to_lowercase();
+            match choice.as_str() {
+                "i" => { modo_inferencia = true; break; }
+                "e" => { break; }
+                _ => continue,
             }
         }
     }
 
-    let tokenizer = if needs_training {
-        println!("🚀 Entrenando nuevo tokenizador con {} archivos...", all_files.len().min(100));
-        let mut sample_text = String::new();
-        let special_token = "<|endoftext|>";
-        sample_text.push_str(special_token);
-        
-        for file_path in all_files.iter().take(100) {
-            if let Ok(mut file) = fs::File::open(file_path) {
-                let mut content = String::new();
-                let mut reader = BufReader::new(file).take(500_000); // 500KB por archivo
-                if reader.read_to_string(&mut content).is_ok() {
-                    sample_text.push_str(&content);
-                    sample_text.push_str(special_token);
-                }
-            }
-        }
-        
-        if sample_text.trim().len() < 1000 {
-            return Err("Error: Muestras insuficientes para alcanzar 4096 tokens.".into());
-        }
-        
-        println!("  -> Bytes totales para entrenamiento: {}", sample_text.len());
-        let t = Tokenizer::from_text(&sample_text, target_vocab_size)?;
-        t.save(tokenizer_path)?;
-        println!("✨ Tokenizador guardado (Vocab: {})", t.vocab_size());
-        t
-    } else {
-        tokenizer.unwrap()
-    };
-
-    let vocab_size = tokenizer.vocab_size();
-    println!("Resumen: Vocabulario={}, Archivos={}", vocab_size, all_files.len());
-    
-    let hidden_size = 256;
-    let num_layers = 1;
-    let seq_length = 256;
-    let batch_size = 16;
-    let stride = 256;
-    let num_epochs = 50;
-
-    let device = Default::default();
-    let dropout = 0.1;
-    let num_heads = 8;
-
-    // DEFINICIÓN DEL ORDEN DE BLOQUES
-    let block_layout = vec![
-      // BlockType::MLSTM, 
-        BlockType::MLSTM, 
-        BlockType::MLSTM, 
-        BlockType::MLSTM, 
-        BlockType::MLSTM,
-        BlockType::MLSTM, 
-    ];
-    let num_blocks = block_layout.len();
-
-    let lr_config = LearningRateConfig::per_block_type(
-        1e-4, // sLSTM
-        8e-7, // mLSTM
-        1e-3, // minGRU
-        1e-4, // Others
-    );
-
-    let config = XLstmconfig::new(vocab_size, hidden_size, num_layers, num_blocks, vocab_size)
-        .with_dropout(dropout)
-        .with_num_heads(num_heads)
-        .with_lstm_type(LstmType::Custom(block_layout.clone()))
-        .with_use_projection(true);   
-
-    println!("Configuración: {} bloques (H={})", num_blocks, hidden_size);
-    println!("Layout: {:?}", block_layout);
-
-    let model_file = format!("{}.mpk", model_path);
-    let mut model = if Path::new(&model_file).exists() {
-        println!("Cargando modelo previo '{}'...", model_file);
+    let mut model: XLstm<MyBackend> = if existe_modelo {
+        println!("Cargando modelo...");
         let recorder = CompactRecorder::new();
-        let record = recorder.load(model_file.into(), &device)
-            .map_err(|e| format!("Error al cargar modelo: {}", e))?;
-        config.init::<MyBackend>(&device).load_record(record)
+        let record = recorder.load(model_file.into(), &device)?;
+        config.init(&device).load_record(record)
     } else {
-        println!("No se encontró modelo previo. Iniciando desde cero.");
-        config.init::<MyBackend>(&device)
+        println!("Iniciando nuevo modelo...");
+        config.init(&device)
     };
 
-    println!("\n¿Qué deseas hacer?");
-    println!("1. Entrenar (continuar o empezar)");
-    println!("2. Inferir (generar texto interactivo)");
-    print!("Selección > ");
-    io::stdout().flush()?;
-    let mut choice = String::new();
-    io::stdin().read_line(&mut choice)?;
-
-    let mut skip_batches = 0;
-    if choice.trim() == "1" {
-        print!("Saltar hasta el batch (0 para empezar desde el inicio) > ");
-        io::stdout().flush()?;
-        let mut skip_input = String::new();
-        io::stdin().read_line(&mut skip_input)?;
-        skip_batches = skip_input.trim().parse::<usize>().unwrap_or(0);
-    } else if choice.trim() == "2" {
-        println!("\nModo Inferencia Chat");
-        println!("====================");
-        println!("Comandos:");
-        println!("  - Escribe tu semilla para generar");
-        println!("  - 'len <n>' para cambiar longitud (ej: len 500)");
-        println!("  - 'salir' para finalizar\n");
-
-        let mut current_len = 200;
+    if modo_inferencia {
+        println!("\n--- MODO CHAT / INFERENCIA ---");
         loop {
-            print!("Semilla (len: {}) > ", current_len);
+            print!("\nSemilla (o 'len n', 'salir') > ");
             io::stdout().flush()?;
             let mut input = String::new();
             io::stdin().read_line(&mut input)?;
             let input = input.trim();
-            
-            if input.is_empty() { continue; }
             if input == "salir" { break; }
-
-            if input.starts_with("len ") {
-                if let Ok(new_len) = input[4..].trim().parse::<usize>() {
-                    current_len = new_len;
-                    println!("  -> Longitud cambiada a: {}", current_len);
-                    continue;
-                }
-            }
+            if input.is_empty() { continue; }
 
             println!("Generando...");
-            let start_gen = Instant::now();
-            let generated = generate_text(&model.valid(), &tokenizer, input, current_len, vocab_size, &device);
-            let elapsed_gen = start_gen.elapsed().as_secs_f32();
-            
-            if generated.is_empty() {
-                println!("  ⚠️ El modelo generó texto vacío ({:.3}s).", elapsed_gen);
-            } else {
-                println!("  ✨ Generación completada en {:.3}s", elapsed_gen);
-            }
-            // Limpieza solo visual para el chat
-            let clean_text = generated
-                .replace('▁', " ")
-                .replace('Ġ', " ")
-                .replace('Ċ', "\n")
-                .replace('↲', "\n")
-                .replace('␣', " ")
-                .replace('\t', "    "); // Convertir tabs a espacios para la consola
-            
-            // Si el texto parece vacío pero hay tokens, es que son solo espacios/control
-            if clean_text.trim().is_empty() && !generated.is_empty() {
-                println!("│ [Contenido: {} espacios/tabs]", generated.len());
-            }
-            
-            // The original `let clean_text = generated;` was redundant after the new `clean_text` definition.
-            // It's removed to avoid shadowing and use the newly cleaned text.
-
-            println!("\n╭──────────────────────────────────────────────────────────╮");
-            println!("│ TEXTO GENERADO:");
-            println!("├──────────────────────────────────────────────────────────┤");
-            
-            for line in clean_text.lines() {
-                let mut current_line = line.to_string();
-                if current_line.is_empty() {
-                    println!("│");
-                    continue;
-                }
-                while current_line.len() > 58 {
-                    let chunk: String = current_line.chars().take(58).collect();
-                    println!("│ {}", chunk);
-                    current_line = current_line.chars().skip(58).collect();
-                }
-                println!("│ {}", current_line);
-            }
-            println!("╰──────────────────────────────────────────────────────────╯\n");
+            let gen = generate_text(&model.valid(), &tokenizer, input, 200, &device);
+            println!("\nRESULTADO:\n----------\n{}\n----------", gen);
         }
         return Ok(());
     }
 
     let mut optim = AdamConfig::new()
-        .with_beta_1(0.9)
-        .with_beta_2(0.999)
-        .with_epsilon(1e-8)
-        .with_weight_decay(Some(WeightDecayConfig::new(1e-4)))
-        .with_grad_clipping(Some(GradientClippingConfig::Norm(1.0)))
+        .with_weight_decay(Some(WeightDecayConfig::new(1e-5)))
+        .with_grad_clipping(Some(GradientClippingConfig::Norm(0.5)))
         .init();
+
     let loss_fn = CrossEntropyLossConfig::new().init(&device);
-
-    println!("\nIniciando entrenamiento por fragmentos...");
-
-    let mut global_batches_skipped = 0;
+    let total_start = Instant::now();
 
     for epoch in 0..num_epochs {
-        println!("\n--- Época {}/{} ---", epoch + 1, num_epochs);
-        let mut total_loss = 0.0f32;
-        let mut processed_in_epoch = 0;
-
-        let mut last_save_time = Instant::now();
+        println!("\nÉpoca {}/{}", epoch + 1, num_epochs);
         let mut token_buffer = Vec::new();
-        let tokens_per_batch = batch_size * stride;
-        let tokens_needed_for_batch = tokens_per_batch + seq_length; 
 
         for (f_idx, file_path) in all_files.iter().enumerate() {
-            // Solo imprimimos si el archivo es relevante o para dar feedback de progreso
-            if f_idx % 10 == 0 || all_files.len() < 100 {
-                print!("\r  [{}/{}] Analizando: {:<40}", f_idx + 1, all_files.len(), file_path.file_name().unwrap_or_default().to_string_lossy());
-                io::stdout().flush().unwrap();
+            if f_idx % 5 == 0 {
+                print!("\r  Procesando archivos: {}/{}", f_idx + 1, all_files.len());
+                io::stdout().flush()?;
             }
 
-            let fragments = FileFragmentIterator::new(file_path, 4).map_err(|e| e.to_string())?;
-            
-            for (_fr_idx, fragment) in fragments.enumerate() {
-                let new_tokens = tokenizer.encode(&fragment);
-                if new_tokens.is_empty() && !fragment.trim().is_empty() {
-                    eprintln!("\n⚠️ ADVERTENCIA: Fragmento produjo 0 tokens. ¿Tokenizador roto?");
-                }
-                token_buffer.extend(new_tokens);
+            let fragments = FileFragmentIterator::new(file_path, 4)?;
+            for fragment in fragments {
+                token_buffer.extend(tokenizer.encode(&fragment));
 
-                // Procesamos mientras el búfer tenga suficientes tokens para al menos un batch completo
-                while token_buffer.len() >= tokens_needed_for_batch + 1 {
-                    let batch_start_time = Instant::now();
+                while token_buffer.len() >= (batch_size * stride + seq_length) {
+                    let (input, targets) = create_batch::<MyBackend>(&token_buffer, 0, batch_size, seq_length, stride, &device);
                     
-                    if global_batches_skipped < skip_batches {
-                        global_batches_skipped += 1;
-                        token_buffer.drain(0..tokens_per_batch);
-                        if global_batches_skipped % 100 == 0 || global_batches_skipped == skip_batches {
-                            print!("\r    ⏩ Saltando batches: {}/{}... ", global_batches_skipped, skip_batches);
-                            io::stdout().flush().unwrap();
-                        }
-                        continue;
-                    }
-
-                    let (input, target) = create_batch::<MyBackend>(
-                        &token_buffer, 0, batch_size, seq_length, stride, vocab_size, &device
-                    );
-
-                    let (logits, _) = model.forward(input, None);
-                    let logits_flat = logits.reshape([batch_size * seq_length, vocab_size]);
-                    let target_flat = target.reshape::<1, _>([batch_size * seq_length]);
-
-                    let loss = loss_fn.forward(logits_flat, target_flat);
+                    let logits = model.forward(input);
+                    let [b, s, v] = logits.dims();
+                    let loss = loss_fn.forward(logits.reshape([b * s, v]), targets.reshape([b * s]));
+                    
                     let loss_val = loss.clone().into_data().as_slice::<f32>().unwrap()[0];
-                    
                     let grads = loss.backward();
-                    model = model.optimizer_step(&lr_config, &mut optim, grads);
+                    let grads = GradientsParams::from_grads(grads, &model);
+                    model = optim.step(1e-4, model, grads);
 
-                    // --- DEBUG: Inspeccionar exactamente lo que entra al modelo ---
-                    if processed_in_epoch == 0 {
-                        println!("\n--- 🔍 PRIMER BATCH ENTRENADO (EP:{}, GLOBAL:{}) ---", epoch, global_batches_skipped);
-                        for b_idx in 0..2.min(batch_size) {
-                            let start = b_idx * stride;
-                            let indices = &token_buffer[start..start + seq_length];
-                            let decoded = tokenizer.decode(indices);
-                            let clean_debug = decoded
-                                .replace('▁', " ")
-                                .replace('Ġ', " ")
-                                .replace('Ċ', "\n")
-                                .replace('\t', "    ");
-                            
-                            println!("SEQ {}:", b_idx);
-                            println!("--------------------------------------------------");
-                            println!("{}", clean_debug);
-                            println!("--------------------------------------------------");
-                        }
-                        println!("------------------------------------------------------------\n");
-                    }
-
-                    total_loss += loss_val;
-                    processed_in_epoch += 1;
-                    global_batches_skipped += 1;
-
-                    // Consumimos los tokens procesados del búfer
-                    token_buffer.drain(0..tokens_per_batch);
-
-                    // Reporte fluido
-                    let elapsed = batch_start_time.elapsed().as_secs_f32();
-                    print!("\r    Global Batch {} | Loss: {:.4} | Time: {:.3}s | Buf: {}     ", 
-                        global_batches_skipped, loss_val, elapsed, token_buffer.len());
-                    io::stdout().flush().unwrap();
-
-                    // --- GUARDADO Y GENERACIÓN AUTOMÁTICA ---
-                    if last_save_time.elapsed().as_secs() >= 180 {
-                        println!("\n\n    💾 Guardado automático (Intervalo 4 min)...");
-                        let recorder = CompactRecorder::new();
-                        let _ = model.clone().save_file(model_path, &recorder);
-                        
-                        println!("    🔍 Generando muestra de prueba:");
-                        let seed = "func _ready():";
-                        let start_gen = Instant::now();
-                        let generated = generate_text(&model.valid(), &tokenizer, seed, 200, vocab_size, &device);
-                        let elapsed_gen = start_gen.elapsed().as_secs_f32();
-                        println!("    ✨ Generado en {:.3}s:", elapsed_gen);
-                        
-                        let full_text = format!("{}{}", seed, generated);
-                        let clean_text = full_text
-                            .replace('▁', " ")
-                            .replace('Ġ', " ")
-                            .replace('Ċ', "\n")
-                            .replace('\t', "    ");
-
-                        println!("    ┌──────────────────────────────────────────────────");
-                        for line in clean_text.lines() {
-                            println!("    │ {}", line);
-                        }
-                        println!("    └──────────────────────────────────────────────────\n");
-                        
-                        last_save_time = Instant::now();
-                    }
+                    token_buffer.drain(0..(batch_size * stride));
+                    
+                    print!("\r    Loss: {:.4} | Buffer: {}     ", loss_val, token_buffer.len());
+                    io::stdout().flush()?;
                 }
             }
-            // --- FIX: Separador entre archivos para evitar que se peguen las palabras ---
-            token_buffer.extend(tokenizer.encode("<|endoftext|>")); 
+            token_buffer.extend(tokenizer.encode("<|endoftext|>"));
         }
-        println!("\n  ✅ Época finalizada. Guardando...");
+
+        println!("\n  Guardando modelo y generando muestra...");
         let recorder = CompactRecorder::new();
-        let _ = model.clone().save_file(model_path, &recorder);
+        model.clone().save_file(model_base_path, &recorder)?;
+
+        let gen = generate_text(&model.valid(), &tokenizer, "func _ready():", 100, &device);
+        println!("  Ejemplo: {}", gen);
     }
 
     Ok(())

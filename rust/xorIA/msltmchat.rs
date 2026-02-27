@@ -270,9 +270,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Model configuration
     let embedding_dim = 256;
-    let num_blocks = 3;
+    let num_blocks = 2;
     let seq_length = 256;
-    let batch_size = 10;
+    let batch_size = 16;
     let num_epochs = 50;
 
     let device = Default::default();
@@ -405,9 +405,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let grads = loss.backward();
                 let grads = GradientsParams::from_grads(grads, &model);
                 
-                let lr = 1e-4; 
+                let lr = 8e-4; 
                 model = optim.step(lr, model, grads);
-
+ 
                 if batch_idx % 5 == 0 || batch_idx == num_batches - 1 {
                     let elapsed_total = total_start.elapsed().as_secs_f32();
                     let batches_done = epoch * num_batches + batch_idx + 1;
