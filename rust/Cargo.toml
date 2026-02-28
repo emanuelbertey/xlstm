@@ -84,3 +84,7 @@ path = "xorIA/bin/mlstm_copy_test.rs"
 name = "burn_comparison"
 path = "xorIA/bin/burn_device_comparison.rs"
 
+[[bin]]
+name = "wiki_mlstm"
+path = "xorIA/wiki_mlstm.rs"
+

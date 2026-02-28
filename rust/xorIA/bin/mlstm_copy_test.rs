@@ -16,7 +16,7 @@ fn main() {
     let batch_size = 1;
     let seq_len = 8;
     let embedding_dim = 16;
-    let lr = 1.2e-3;
+    let lr = 8e-4;
     
     let config = MLSTMLayerConfig::new(embedding_dim)
         .with_num_heads(4)

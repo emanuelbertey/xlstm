@@ -6,6 +6,8 @@ xLSTM Pro Trainer - High Performance Data Streaming with WGPU
 This tool is designed to train xLSTM models on large datasets (directories, 
 multiple file formats, and gigabyte-sized files) without exhausting RAM.
 Updated to use the new mLSTM architecture with 2 blocks on GPU.
+Streaming: processes files in 10 MB fragments, training starts immediately
+without waiting for the whole file to load.
 */
 
 use burn::grad_clipping::GradientClippingConfig;
@@ -182,20 +184,18 @@ impl Iterator for FileFragmentIterator {
     }
 }
 
-/// Create training batch (B, S)
 fn create_batch<B: Backend>(
     tokens: &[usize],
     start_idx: usize,
     batch_size: usize,
     seq_length: usize,
-    stride: usize,
     device: &B::Device,
 ) -> (Tensor<B, 2, Int>, Tensor<B, 2, Int>) {
     let mut x_indices = Vec::with_capacity(batch_size * seq_length);
     let mut y_indices = Vec::with_capacity(batch_size * seq_length);
 
     for i in 0..batch_size {
-        let current_start = start_idx + i * stride;
+        let current_start = start_idx + i;
         for j in 0..seq_length {
             let x_idx = if current_start + j < tokens.len() { tokens[current_start + j] } else { 0 };
             let y_idx = if current_start + j + 1 < tokens.len() { tokens[current_start + j + 1] } else { 0 };
@@ -204,15 +204,8 @@ fn create_batch<B: Backend>(
         }
     }
 
-    let x = Tensor::<B, 2, Int>::from_data(
-        TensorData::new(x_indices, [batch_size, seq_length]),
-        device,
-    );
-    let y = Tensor::<B, 2, Int>::from_data(
-        TensorData::new(y_indices, [batch_size, seq_length]),
-        device,
-    );
-
+    let x = Tensor::<B, 2, Int>::from_data(TensorData::new(x_indices, [batch_size, seq_length]), device);
+    let y = Tensor::<B, 2, Int>::from_data(TensorData::new(y_indices, [batch_size, seq_length]), device);
     (x, y)
 }
 
@@ -325,7 +318,10 @@ fn generate_text<B: Backend>(
         next_id = sample_from_logits(logits, temp, top_k, top_p, r_penalty, &history);
     }
 
-    tokenizer.decode(&result_ids)
+    let elapsed = start_time.elapsed().as_secs_f32();
+    let text = tokenizer.decode(&result_ids);
+    println!("  [Generación] Tokens generados: {} en {:.2}s", result_ids.len(), elapsed);
+    text
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -381,7 +377,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let num_blocks = 2;
     let seq_length = 256;
     let batch_size = 16;
-    let stride = 128;
     let num_epochs = 30;
 
     let device = WgpuDevice::default();
@@ -399,6 +394,21 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
     };
 
+    let slstm_cfg = SLSTMBlockConfig {
+        slstm: SLSTMLayerConfig {
+            embedding_dim,
+            num_heads: 4,
+            conv1d_kernel_size: 4,
+            dropout: 0.1,
+        },
+        feedforward: Some(GatedFeedForwardConfig {
+            embedding_dim,
+            proj_factor: 1.3,
+            bias: true,
+            dropout: 0.1,
+        }),
+    };
+
     let config = XLstmConfig {
         vocab_size,
         add_embedding_dropout: true,
@@ -410,7 +420,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             bias: true,
             dropout: 0.1,
             mlstm_block: Some(mlstm_cfg),
-            slstm_block: None, 
+            slstm_block: Some(slstm_cfg),
             slstm_at: vec![], // Solo mLSTM
         },
     };
@@ -445,9 +455,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
 
     if modo_inferencia {
-        println!("\n--- MODO CHAT / INFERENCIA ---");
+        println!("\n--- MODO INFERENCIA ---");
         loop {
-            print!("\nSemilla (o 'len n', 'salir') > ");
+            print!("\nSemilla > ");
             io::stdout().flush()?;
             let mut input = String::new();
             io::stdin().read_line(&mut input)?;
@@ -469,43 +479,84 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let loss_fn = CrossEntropyLossConfig::new().init(&device);
     let total_start = Instant::now();
+    let mut last_save = Instant::now();
+    let save_interval = std::time::Duration::from_secs(4 * 60);
+    let lr = 8e-4;
 
     for epoch in 0..num_epochs {
         println!("\nÉpoca {}/{}", epoch + 1, num_epochs);
-        let mut token_buffer = Vec::new();
+        let mut total_loss = 0.0;
+        let mut batches_count = 0;
 
         for (f_idx, file_path) in all_files.iter().enumerate() {
-            if f_idx % 5 == 0 {
-                print!("\r  Procesando archivos: {}/{}", f_idx + 1, all_files.len());
-                io::stdout().flush()?;
-            }
+            let fname = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+            println!("  [{}/{}] ARCHIVO: {}", f_idx + 1, all_files.len(), fname);
 
-            let fragments = FileFragmentIterator::new(file_path, 4)?;
-            for fragment in fragments {
-                token_buffer.extend(tokenizer.encode(&fragment));
+            let fragments = FileFragmentIterator::new(file_path, 1)?; 
 
-                while token_buffer.len() >= (batch_size * stride + seq_length) {
-                    let (input, targets) = create_batch::<MyBackend>(&token_buffer, 0, batch_size, seq_length, stride, &device);
+            for (frag_idx, fragment) in fragments.enumerate() {
+                let tokens = tokenizer.encode(&fragment);
+                let tokens_per_batch = batch_size * seq_length;
+                let num_batches = tokens.len() / tokens_per_batch;
+                
+                if num_batches == 0 { continue; }
+
+                for batch_idx in 0..num_batches {
+                    let start_idx = batch_idx * tokens_per_batch;
                     
+                 //   println!("    [Batch {}] PRE create_batch", batch_idx + 1);
+                    let (input, targets) = create_batch::<MyBackend>(&tokens, start_idx, batch_size, seq_length, &device);
+
+                  //  println!("    [Batch {}] PRE forward", batch_idx + 1);
                     let logits = model.forward(input);
                     let [b, s, v] = logits.dims();
-                    let loss = loss_fn.forward(logits.reshape([b * s, v]), targets.reshape([b * s]));
                     
+                 //   println!("    [Batch {}] PRE loss", batch_idx + 1);
+                    let logits_flat = logits.reshape([b * s, v]);
+                    let targets_flat = targets.reshape([b * s]);
+                    let loss = loss_fn.forward(logits_flat, targets_flat);
+
+                  //  println!("    [Batch {}] PRE sync (loss into_data)", batch_idx + 1);
                     let loss_val = loss.clone().into_data().as_slice::<f32>().unwrap()[0];
+                    
+                    // --- Detección de NaN/Inf ---
+                    let avg_loss = total_loss / batches_count.max(1) as f32;
+                    if loss_val.is_nan() || loss_val.is_infinite() || avg_loss.is_nan() || avg_loss.is_infinite() {
+                        println!("\n🚨 ERROR: ¡Detectado NaN o Inf en Loss ({:.4}, avg: {:.4})! Deteniendo...", loss_val, avg_loss);
+                        std::process::exit(1);
+                    }
+
+                    total_loss += loss_val;
+                    batches_count += 1;
+
+              //      println!("    [Batch {}] PRE backward", batch_idx + 1);
                     let grads = loss.backward();
                     let grads = GradientsParams::from_grads(grads, &model);
-                    model = optim.step(1e-4, model, grads);
-
-                    token_buffer.drain(0..(batch_size * stride));
                     
-                    print!("\r    Loss: {:.4} | Buffer: {}     ", loss_val, token_buffer.len());
+                 //   println!("    [Batch {}] PRE step", batch_idx + 1);
+                    model = optim.step(lr as f64, model, grads);
+
+                    let elapsed = total_start.elapsed().as_secs_f32();
+                    let tps = (batches_count * tokens_per_batch) as f32 / elapsed;
+                    let avg_loss = total_loss / batches_count as f32;
+
+                    println!("    [Batch {}] OK | Loss: {:.4} | Avg: {:.4} | Speed: {:.1} tok/s", 
+                        batch_idx + 1, loss_val, avg_loss, tps);
                     io::stdout().flush()?;
+
+                    // --- Autoguardado cada 4 min (si todo está bien) ---
+                    if last_save.elapsed() >= save_interval {
+                        println!("\n💾 [4 min] Guardando modelo preventivamente...");
+                        let recorder = CompactRecorder::new();
+                        model.clone().save_file(model_base_path, &recorder).ok();
+                        last_save = Instant::now();
+                    }
                 }
+                println!();
             }
-            token_buffer.extend(tokenizer.encode("<|endoftext|>"));
         }
 
-        println!("\n  Guardando modelo y generando muestra...");
+        println!("\n  Guardando modelo...");
         let recorder = CompactRecorder::new();
         model.clone().save_file(model_base_path, &recorder)?;
 

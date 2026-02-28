@@ -8,7 +8,11 @@ cargo run --release --bin msltmchat_gpu -- input.txt
 
 cargo run --release --bin mlstm_equivalence 
 
-cargo run --release --bin mlstm_copy_test
+cargo run --release --bin mlstm_copy_test 
+
+cargo run --release --bin mlstm_grad_stability 
+
+cargo run --release --bin mlstm_stability_test 
 
 $env:PYTHONPATH = "."; py tests\mlstm_equivalence.py
 
@@ -21,3 +25,13 @@ $env:PYTHONPATH = "."; py tests\mlstm_grad_stability.py
 $env:PYTHONPATH = "."; py tests\mlstm_stability_test.py
 
 $env:RUST_BACKTRACE=1; cargo run --release --bin pro_trainer -- "C:/Repos/"
+
+$env:RUST_BACKTRACE=1; cargo run --release --bin pro_trainer -- C:/Windows.old/Users/emabertey/Downloads/dataset/wikitext-103-raw
+
+C:/Windows.old/Users/emabertey/Downloads/dataset/wikitext-103-raw
+
+cargo run --release --bin wiki_mlstm -- C:/Windows.old/Users/emabertey/Downloads/dataset/TinyStoriesV2-GPT4-train.txt
+
+cargo run --release --bin wiki_mlstm -- input.txt
+
+cargo run --release --bin wiki_mlstm -- input.txt

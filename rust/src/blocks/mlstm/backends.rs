@@ -43,7 +43,7 @@ pub fn parallel_stabilized_simple<B: Backend>(
     let h_num = c_matrix.clone().matmul(values); 
     let qn_dot = c_matrix.sum_dim(3).abs();
     
-    let h_den = qn_dot + (m.neg()).exp() + eps;
+    let h_den = qn_dot.max_pair((m.neg()).exp()) + eps;
 
     h_num / h_den
 }
@@ -79,7 +79,7 @@ pub fn recurrent_step_stabilized_simple<B: Backend>(
     let h_num = q_scaled.clone().matmul(c_new.clone()); 
     let qn_dot = q_scaled.matmul(n_new.clone());
     
-    let h_denom = qn_dot.abs() + (m_new.clone().neg()).exp() + eps;
+    let h_denom = qn_dot.abs().max_pair((m_new.clone().neg()).exp()) + eps;
 
     (h_num / h_denom, (c_new, n_new, m_new))
 }
