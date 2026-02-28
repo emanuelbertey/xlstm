@@ -128,6 +128,7 @@ impl XLSTMBlockStackConfig {
                     weight: true,
                     bias: false,
                     eps: 1e-5,
+                    residual_weight: true,
                 }
                 .init(device),
             )

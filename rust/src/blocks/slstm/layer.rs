@@ -87,6 +87,7 @@ impl SLSTMLayerConfig {
             weight: true,
             bias: false,
             eps: 1e-5,
+            residual_weight: true,
         }
         .init(self.num_heads, device);
 

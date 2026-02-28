@@ -56,6 +56,7 @@ impl XLSTMBlockMlstmConfig {
             weight: true,
             bias: false,
             eps: 1e-5,
+            residual_weight: true,
         }
         .init(device);
 
@@ -78,6 +79,7 @@ impl XLSTMBlockSlstmConfig {
             weight: true,
             bias: false,
             eps: 1e-5,
+            residual_weight: true,
         }
         .init(device);
 
@@ -89,6 +91,7 @@ impl XLSTMBlockSlstmConfig {
                 weight: true,
                 bias: false,
                 eps: 1e-5,
+                residual_weight: true,
             }
             .init(device);
             let ff = ff_config.init(device);
