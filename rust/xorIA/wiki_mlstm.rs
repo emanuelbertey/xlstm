@@ -13,6 +13,7 @@ use burn::{
     tensor::{activation::softmax, Tensor, backend::Backend, Int},
     nn::loss::CrossEntropyLossConfig,
 };
+use burn::grad_clipping::GradientClippingConfig;
 use burn::tensor::TensorData;
 use burn_autodiff::Autodiff;
 use burn_ndarray::NdArray;
@@ -118,7 +119,7 @@ impl FileFragmentIterator {
         let file = fs::File::open(path)?;
         Ok(Self {
             reader: io::BufReader::new(file),
-            buffer_size: buffer_size_mb * 1024 * 1024,
+            buffer_size: buffer_size_mb * 2048 * 1024,
             finished: false,
         })
     }
@@ -485,6 +486,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     if !modo_inferencia {
         let mut optim = AdamConfig::new()
             .with_weight_decay(Some(WeightDecayConfig::new(1e-5)))
+            .with_grad_clipping(Some(GradientClippingConfig::Norm(1.0)))
             .init();
 
         let loss_fn = CrossEntropyLossConfig::new().init(&device);

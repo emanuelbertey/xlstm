@@ -295,11 +295,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut embedding_dim = 256;
     let mut num_blocks = 2;
     let mut num_heads = 4;
-    let mut lr = 1.5e-3;
-    let mut num_epochs = 30;
+    let mut lr = 1e-3;
+    let mut num_epochs = 40;
     let mut batch_size = 16;
-    let mut temperature = 0.8;
-    let mut r_penalty = 1.1;
+    let mut temperature = 0.5;
+    let mut r_penalty = 1.9;
     let seq_length = 256;
 
     let device = WgpuDevice::default();

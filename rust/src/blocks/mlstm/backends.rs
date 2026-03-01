@@ -36,16 +36,18 @@ pub fn parallel_stabilized_simple<B: Backend>(
     let d_matrix = (masked_log_d - m.clone()).exp().mask_fill(mask.equal_elem(0.0), 0.0);
 
     // 6. Cómputo final
-    let qk_matrix = queries.matmul(keys.swap_dims(2, 3)) * scale;
+    // python: qk_matrix = queries @ keys_scaled.transpose(-2, -1)
+    let keys_scaled = keys * scale;
+    let qk_matrix = queries.matmul(keys_scaled.swap_dims(2, 3));
     let c_matrix = qk_matrix * d_matrix;
     
-    // Clonamos c_matrix porque matmul() consume el original
-    let h_num = c_matrix.clone().matmul(values); 
-    let qn_dot = c_matrix.sum_dim(3).abs();
-    
+    let qn_dot = c_matrix.clone().sum_dim(3).abs();
     let h_den = qn_dot.max_pair((m.neg()).exp()) + eps;
 
-    h_num / h_den
+    // python: C_matrix_normalized = C_matrix / (normalizer + eps)
+    // h_tilde_state = C_matrix_normalized @ values
+    let c_matrix_normalized = c_matrix / h_den;
+    c_matrix_normalized.matmul(values)
 }
 
 pub fn recurrent_step_stabilized_simple<B: Backend>(
@@ -70,14 +72,18 @@ pub fn recurrent_step_stabilized_simple<B: Backend>(
     let f_act = (m_state + log_fg - m_new.clone()).exp();
     let i_act = (igate_preact - m_new.clone()).exp(); 
 
-    let k_t = k.swap_dims(2, 3); 
+    // python: k_scaled = k / math.sqrt(DH)
+    let k_scaled = k * scale;
+    let k_t_scaled = k_scaled.swap_dims(2, 3); 
 
-    let c_new = c_state * f_act.clone() + k_t.clone().matmul(v) * i_act.clone();
-    let n_new = n_state * f_act + k_t * i_act;
+    // python: c_state_new = fg_act * c_state + ig_act * (k_scaled @ v.transpose(-1, -2))
+    let c_new = c_state * f_act.clone() + k_t_scaled.clone().matmul(v) * i_act.clone();
+    
+    // python: n_state_new = fg_act * n_state + ig_act * k_scaled
+    let n_new = n_state * f_act + k_t_scaled * i_act;
 
-    let q_scaled = q * scale;
-    let h_num = q_scaled.clone().matmul(c_new.clone()); 
-    let qn_dot = q_scaled.matmul(n_new.clone());
+    let h_num = q.clone().matmul(c_new.clone()); 
+    let qn_dot = q.matmul(n_new.clone());
     
     let h_denom = qn_dot.abs().max_pair((m_new.clone().neg()).exp()) + eps;
 
