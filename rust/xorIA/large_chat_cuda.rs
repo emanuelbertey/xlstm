@@ -299,7 +299,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let tokenizer_path = "large_v1_cuda.json";
     let model_file = "large_v1_model_cuda.mpk";
 
-    let target_vocab_size = 2048;
+    let target_vocab_size = 8192;
     let tokenizer = if Path::new(tokenizer_path).exists() { 
         println!("Cargando tokenizador existente...");
         Tokenizer::load(tokenizer_path)?
@@ -314,7 +314,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let vocab_size = tokenizer.vocab_size();
     println!("Tamaño del vocabulario: {}\n", vocab_size);
 
-    let mut embedding_dim = 512;
+    let mut embedding_dim = 768;
     let mut num_blocks = 5;
     let mut num_heads = 4;
     let mut lr = 3e-3;
@@ -322,7 +322,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut batch_size = 16;
     let mut temperature = 0.8;
     let mut r_penalty = 1.1;
-    let seq_length = 256;
+    let seq_length = 320;
 
     let device = CudaDevice::default();
     let existe_modelo = Path::new(model_file).exists();
