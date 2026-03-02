@@ -104,7 +104,7 @@ impl<B: Backend> LayerNorm<B> {
 
 // ─── MultiHeadLayerNorm ───────────────────────────────────────────────────────
 
-#[derive(Config, Debug)]
+#[derive(Config, Debug, Default)]
 pub struct MultiHeadLayerNormConfig {
     pub ndim: usize,
     #[config(default = true)]

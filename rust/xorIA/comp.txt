@@ -8,6 +8,8 @@ cargo run --release --bin msltmchat_gpu -- input.txt
 
 cargo run --release --bin msltmchat_cuda -- input.txt
 
+cargo run --release --bin xlstm-bin
+
 cargo run --release --bin mlstm_equivalence 
 
 cargo run --release --bin mlstm_copy_test 
@@ -52,3 +54,7 @@ cargo run --release --bin wiki_mlstm -- C:/Windows.old/Users/emabertey/Downloads
 
 
 cargo run --release --bin wiki_mlstm -- input.txt
+
+cargo run --release --bin large_chat -- input.txt
+
+cargo run --release --bin main
