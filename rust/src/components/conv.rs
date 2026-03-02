@@ -3,7 +3,7 @@ use burn::nn;
 use burn::module::Module;
 use burn::config::Config;
 
-#[derive(Config)]
+#[derive(Config, Debug)]
 pub struct CausalConv1dConfig {
     pub feature_dim: usize,
     pub kernel_size: usize,
@@ -57,7 +57,7 @@ impl<B: Backend> CausalConv1d<B> {
         // Convert [B, Kernel, F] -> [B, F, Kernel]
         let x_padded = new_state.clone().swap_dims(1, 2);
         
-        let mut y = self.conv.forward(x_padded).squeeze(2);
+        let mut y = self.conv.forward(x_padded).squeeze::<2>();
         
         (y, new_state)
     }

@@ -5,7 +5,7 @@ use burn::nn;
 
 // ─── LayerNorm ────────────────────────────────────────────────────────────────
 
-#[derive(Config)]
+#[derive(Config, Debug)]
 pub struct LayerNormConfig {
     pub ndim: usize,
     #[config(default = true)]
@@ -104,7 +104,7 @@ impl<B: Backend> LayerNorm<B> {
 
 // ─── MultiHeadLayerNorm ───────────────────────────────────────────────────────
 
-#[derive(Config)]
+#[derive(Config, Debug)]
 pub struct MultiHeadLayerNormConfig {
     pub ndim: usize,
     #[config(default = true)]

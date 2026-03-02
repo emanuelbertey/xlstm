@@ -7,11 +7,11 @@ edition = "2021"
 path = "src/lib.rs"
 
 [dependencies]
-burn = { version = "0.16.1", features = ["ndarray", "wgpu", "autodiff", "train"] }
-burn-autodiff = "0.16.1"
-burn-ndarray = "0.16.1"
-burn-wgpu = "0.16.1"
-burn-cuda = "0.16.1"
+burn = { version = "0.20.1", features = ["ndarray", "wgpu", "autodiff", "train"] }
+burn-autodiff = "0.20.1"
+burn-ndarray = "0.20.1"
+burn-wgpu = "0.20.1"
+burn-cuda = "0.20.1"
 tokenizers = "0.20"
 rand = "0.9"
 num-traits = "0.2"

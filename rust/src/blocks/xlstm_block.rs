@@ -37,12 +37,12 @@ pub struct XLSTMBlock<B: Backend> {
     pub ffn: Option<GatedFeedForward<B>>,
 }
 
-#[derive(Config)]
+#[derive(Config, Debug)]
 pub struct XLSTMBlockMlstmConfig {
     pub mlstm: MLSTMLayerConfig,
 }
 
-#[derive(Config)]
+#[derive(Config, Debug)]
 pub struct XLSTMBlockSlstmConfig {
     pub slstm: SLSTMLayerConfig,
     pub feedforward: Option<GatedFeedForwardConfig>,

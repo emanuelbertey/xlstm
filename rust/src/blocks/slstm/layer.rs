@@ -14,7 +14,7 @@ use crate::components::linear_headwise::{LinearHeadwiseExpand, LinearHeadwiseExp
 use crate::components::ln::{MultiHeadLayerNorm, MultiHeadLayerNormConfig};
 use super::cell::{SLSTMCell, SLSTMCellConfig, SLSTMState};
 
-#[derive(Config)]
+#[derive(Config, Debug)]
 pub struct SLSTMLayerConfig {
     pub embedding_dim: usize,
     #[config(default = 4)]

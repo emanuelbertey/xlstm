@@ -16,7 +16,7 @@ use crate::components::ln::{MultiHeadLayerNorm, MultiHeadLayerNormConfig};
 use crate::components::init::bias_linspace_init;
 use super::backends::{parallel_stabilized_simple, recurrent_step_stabilized_simple};
 
-#[derive(Config)]
+#[derive(Config, Debug)]
 pub struct MLSTMCellConfig {
     pub context_length: usize,
     pub embedding_dim: usize,

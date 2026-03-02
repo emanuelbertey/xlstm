@@ -38,7 +38,10 @@ use xlstm::blocks::slstm::layer::SLSTMLayerConfig;
 use xlstm::components::feedforward::GatedFeedForwardConfig;
 
 // Use NdArray backend with Autodiff (CPU)
-type MyBackend = Autodiff<NdArray<f32>>;
+
+type MyBackend = Autodiff<NdArray<f64>>;
+
+//type MyBackend = Autodiff<NdArray<f32>>;
 
 /// Professional Tokenizer using Hugging Face 'tokenizers'
 pub struct Tokenizer {
@@ -328,8 +331,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let model_file = format!("{}.mpk", model_base_path);
 
     // Load or create tokenizer
-    let target_vocab_size = 8192;
-    let tokenizer = if Path::new(tokenizer_path).exists() {
+    let target_vocab_size = 2048;
+    let tokenizer = if Path::new(tokenizer_path).exists() { 
         println!("Cargando tokenizador existente...");
         Tokenizer::load(tokenizer_path)?
     } else {
@@ -486,7 +489,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     if !modo_inferencia {
         let mut optim = AdamConfig::new()
             .with_weight_decay(Some(WeightDecayConfig::new(1e-5)))
-            .with_grad_clipping(Some(GradientClippingConfig::Norm(1.0)))
+            .with_grad_clipping(Some(GradientClippingConfig::Norm(0.5)))
             .init();
 
         let loss_fn = CrossEntropyLossConfig::new().init(&device);

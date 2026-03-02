@@ -273,7 +273,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let model_path = "xlstm_chat_model_cuda"; 
 
     // Load or create tokenizer
-    let target_vocab_size = 2048;
+    let target_vocab_size = 8192;
     let tokenizer = if Path::new(tokenizer_path).exists() {
         println!("Cargando tokenizador existente...");
         Tokenizer::load(tokenizer_path)?

@@ -10,7 +10,7 @@ use burn::module::{Module, Param};
 use burn::config::Config;
 use burn::tensor::Distribution;
 
-#[derive(Config)]
+#[derive(Config, Debug)]
 pub struct LinearHeadwiseExpandConfig {
     pub in_features: usize,
     pub num_heads: usize,

@@ -27,7 +27,7 @@ use crate::components::conv::{CausalConv1d, CausalConv1dConfig};
 use crate::components::linear_headwise::{LinearHeadwiseExpand, LinearHeadwiseExpandConfig};
 use super::cell::{MLSTMCell, MLSTMCellConfig};
 
-#[derive(Config)]
+#[derive(Config, Debug)]
 pub struct MLSTMLayerConfig {
     pub embedding_dim: usize,
     #[config(default = 4)]
