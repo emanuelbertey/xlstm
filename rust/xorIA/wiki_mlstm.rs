@@ -39,9 +39,9 @@ use xlstm::components::feedforward::GatedFeedForwardConfig;
 
 // Use NdArray backend with Autodiff (CPU)
 
-type MyBackend = Autodiff<NdArray<f64>>;
+//type MyBackend = Autodiff<NdArray<f64>>;
 
-//type MyBackend = Autodiff<NdArray<f32>>;
+type MyBackend = Autodiff<NdArray<f32>>;
 
 /// Professional Tokenizer using Hugging Face 'tokenizers'
 pub struct Tokenizer {

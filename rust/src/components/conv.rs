@@ -57,7 +57,9 @@ impl<B: Backend> CausalConv1d<B> {
         // Convert [B, Kernel, F] -> [B, F, Kernel]
         let x_padded = new_state.clone().swap_dims(1, 2);
         
-        let mut y = self.conv.forward(x_padded).squeeze::<2>();
+        let mut y = self.conv.forward(x_padded);
+        let [b, f_dim, _l] = y.dims();
+        let y = y.reshape([b, f_dim]);
         
         (y, new_state)
     }
