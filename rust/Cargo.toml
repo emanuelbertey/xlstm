@@ -64,7 +64,7 @@ path = "xorIA/pro_trainer.rs"
 
 
 [[bin]]
-name = "mlstm_stability"
+name = "mlstm_stability_test"
 path = "xorIA/bin/mlstm_stability.rs"
 
 
@@ -92,3 +92,15 @@ path = "xorIA/wiki_mlstm.rs"
 [[bin]]
 name = "msltmchat_cuda"
 path = "xorIA/msltmchat (cuda).rs"
+
+[[bin]]
+name = "dual_test"
+path = "xorIA/bin/dual_test.rs"
+
+[[bin]]
+name = "test_mingru"
+path = "xorIA/bin/test_mingru.rs"
+
+[[bin]]
+name = "test_slstm"
+path = "xorIA/bin/test_slstm.rs"

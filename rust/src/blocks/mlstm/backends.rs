@@ -29,7 +29,8 @@ pub fn parallel_stabilized_simple<B: Backend>(
         .unsqueeze::<4>();
     
     // m_i = max_{j <= i} (log_D_{ij})
-    let masked_log_d = log_d_matrix.mask_fill(mask.clone().equal_elem(0.0), -1e10);
+    // Usamos NEG_INFINITY para que exp() del futuro sea 0 absoluto, igual que en Python.
+    let masked_log_d = log_d_matrix.mask_fill(mask.clone().equal_elem(0.0), f32::NEG_INFINITY);
     let m = masked_log_d.clone().max_dim(3);
 
     // 5. Matriz de atención estabilizada
@@ -42,7 +43,9 @@ pub fn parallel_stabilized_simple<B: Backend>(
     let c_matrix = qk_matrix * d_matrix;
     
     let qn_dot = c_matrix.clone().sum_dim(3).abs();
-    let h_den = qn_dot.max_pair((m.neg()).exp()) + eps;
+    // Safety clamp (opcional si hay NaNs en CPU): let m_safe = m.neg().clamp_max(88.0);
+    // let h_den = qn_dot.max_pair(m_safe.exp()) + eps; 
+    let h_den = qn_dot.max_pair(m.neg().exp()) + eps;
 
     // python: C_matrix_normalized = C_matrix / (normalizer + eps)
     // h_tilde_state = C_matrix_normalized @ values
@@ -84,20 +87,18 @@ pub fn recurrent_step_stabilized_simple<B: Backend>(
 
     let h_num = q.clone().matmul(c_new.clone()); 
     let qn_dot = q.matmul(n_new.clone());
-    
-    let h_denom = qn_dot.abs().max_pair((m_new.clone().neg()).exp()) + eps;
+
+    // Safety clamp (opcional si hay NaNs en CPU): let m_safe = m_new.clone().neg().clamp_max(88.0);
+    // let h_denom = qn_dot.abs().max_pair(m_safe.exp()) + eps;
+    let h_denom = qn_dot.abs().max_pair(m_new.clone().neg().exp()) + eps;
 
     (h_num / h_denom, (c_new, n_new, m_new))
 }
 
 fn log_sigmoid<B: Backend, const D: usize>(x: Tensor<B, D>) -> Tensor<B, D> {
-    burn::tensor::activation::softplus(x.neg(), 1.0).neg()
+    burn::tensor::activation::log_sigmoid(x)
 }
 
-fn cumsum_matrix<B: Backend>(x: Tensor<B, 4>, s: usize, device: &B::Device) -> Tensor<B, 4> {
-    let tril = Tensor::<B, 2>::ones([s, s], device)
-        .tril(0)
-        .unsqueeze::<3>()
-        .unsqueeze::<4>();
-    tril.matmul(x)
+fn cumsum_matrix<B: Backend>(x: Tensor<B, 4>, _s: usize, _device: &B::Device) -> Tensor<B, 4> {
+    x.cumsum(2)
 }

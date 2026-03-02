@@ -4,7 +4,7 @@ use burn_autodiff::Autodiff;
 use burn::backend::ndarray::NdArray;
 use burn::prelude::*;
 
-type TestBackend = NdArray<f32>;
+type TestBackend = NdArray<f64>;
 type AdBackend = Autodiff<TestBackend>;
 
 fn main() {

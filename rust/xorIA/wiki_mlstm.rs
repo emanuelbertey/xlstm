@@ -349,7 +349,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut embedding_dim = 512;
     let mut num_blocks = 4;
     let mut num_heads = 8;
-    let mut lr = 1.5e-3;
+    let mut lr = 8e-4;
     let mut num_epochs = 30;
     let mut batch_size = 16;
     let mut temperature = 0.8;
