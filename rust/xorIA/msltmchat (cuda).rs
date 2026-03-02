@@ -2,7 +2,7 @@
 
 /*!
 Text Generation with xLSTM using Character-Level Tokenization (GPU version)
-Updated to use the new xLSTM Rust port with 1 mLSTM block on WebGPU.
+Updated to use the new xLSTM Rust port with 1 mLSTM block on CUDA.
 */
 
 use burn::optim::decay::WeightDecayConfig;
@@ -16,7 +16,7 @@ use burn::{
 use burn::grad_clipping::GradientClippingConfig;
 use burn::tensor::TensorData;
 use burn_autodiff::Autodiff;
-use burn_wgpu::{Wgpu, WgpuDevice};
+use burn_cuda::{Cuda, CudaDevice};
 use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
@@ -36,8 +36,8 @@ use xlstm::blocks::slstm::block::SLSTMBlockConfig;
 use xlstm::blocks::slstm::layer::SLSTMLayerConfig;
 use xlstm::components::feedforward::GatedFeedForwardConfig;
 
-// Use WGPU backend with Autodiff
-type MyBackend = Autodiff<Wgpu<f32, i32>>;
+// Use CUDA backend with Autodiff
+type MyBackend = Autodiff<Cuda<f32, i32>>;
 
 /// Professional Tokenizer using Hugging Face 'tokenizers'
 pub struct Tokenizer {
@@ -62,7 +62,7 @@ impl Tokenizer {
             .build();
 
         let mut trainer_wrapper = TrainerWrapper::from(trainer);
-        let temp_file = "temp_train_gpu.txt";
+        let temp_file = "temp_train_cuda.txt";
         fs::write(temp_file, text)?;
         tokenizer.train_from_files(&mut trainer_wrapper, vec![temp_file.to_string()])
             .map_err(|e| format!("Error en entrenamiento: {}", e))?;
@@ -259,18 +259,18 @@ fn generate_text_typed<B: Backend>(
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    println!("xLSTM Text Generation - GPU Port (WGPU)");
+    println!("xLSTM Text Generation - GPU Port (CUDA)");
     println!("========================================\n");
 
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("Uso: cargo run --bin msltmchat_gpu -- <archivo.txt>");
+        eprintln!("Uso: cargo run --bin msltmchat_cuda -- <archivo.txt>");
         std::process::exit(1);
     }
 
     let text_file = &args[1];
     let tokenizer_path = "tokenizer.json";
-    let model_path = "xlstm_chat_model_gpu"; 
+    let model_path = "xlstm_chat_model_cuda"; 
 
     // Load or create tokenizer
     let target_vocab_size = 2048;
@@ -292,7 +292,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let tokens = tokenizer.encode(&text);
     println!("Tokens totales: {}\n", tokens.len());
 
-    let mut embedding_dim = 256;
+    let mut embedding_dim = 512;
     let mut num_blocks = 5;
     let mut num_heads = 4;
     let mut lr = 1e-3;
@@ -300,9 +300,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut batch_size = 16;
     let mut temperature = 0.5;
     let mut r_penalty = 1.9;
-    let seq_length = 256;
+    let seq_length = 512;
 
-    let device = WgpuDevice::default();
+    let device = CudaDevice::default();
     let model_file = format!("{}.mpk", model_path);
     let existe_modelo = Path::new(&model_file).exists();
     
@@ -491,7 +491,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             println!("  Generado: {}\n", generated);
 
             let recorder = CompactRecorder::new();
-            model.clone().save_file(model_path, &recorder)?;
+            model.clone().save_file(model_path.to_string(), &recorder)?;
         }
         println!("\n¡Entrenamiento GPU completado!");
     } else {

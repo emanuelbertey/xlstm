@@ -5522,6 +5522,7 @@ version = "0.1.0"
 dependencies = [
  "burn",
  "burn-autodiff",
+ "burn-cuda",
  "burn-ndarray",
  "burn-wgpu",
  "num-traits",
