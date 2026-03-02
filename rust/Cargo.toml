@@ -23,6 +23,10 @@ name = "large_chat"
 path = "xorIA/large_chat.rs"
 
 [[bin]]
+name = "large_chat_cuda"
+path = "xorIA/large_chat_cuda.rs"
+
+[[bin]]
 name = "msltmchat"
 path = "xorIA/msltmchat.rs"
 

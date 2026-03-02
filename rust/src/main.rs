@@ -106,13 +106,15 @@ fn main() {
         vocab_size: 256,
         use_bias: true,
         norm_eps: 1e-6,
+        norm_reduction_force_float32: true,
         add_out_norm: true,
         qk_dim_factor: 0.5,
         v_dim_factor: 1.0,
+        mlstm_backend: xlstm::blocks::xlstm_large::config::MLSTMBackendConfig::new(),
         ffn_proj_factor: 2.6667,
         ffn_round_up_to_multiple_of: 64,
-        gate_soft_cap: 15.0,
-        output_logit_soft_cap: 30.0,
+        gate_soft_cap: Some(15.0),
+        output_logit_soft_cap: Some(30.0),
         weight_mode: "single".to_string(),
     };
 

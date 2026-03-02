@@ -1,7 +1,7 @@
 #![recursion_limit = "256"]
 
 /*!
-Text Generation with xLSTMLarge using the new optimized architecture.
+Text Generation with xLSTMLarge using the new optimized architecture (GPU version).
 */
 
 use burn::optim::decay::WeightDecayConfig;
@@ -15,7 +15,7 @@ use burn::{
 use burn::grad_clipping::GradientClippingConfig;
 use burn::tensor::TensorData;
 use burn_autodiff::Autodiff;
-use burn_ndarray::NdArray;
+use burn_cuda::{Cuda, CudaDevice};
 use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
@@ -30,8 +30,8 @@ use tokenizers::models::TrainerWrapper;
 
 use xlstm::blocks::xlstm_large::{XLSTMLarge, XLSTMLargeConfig, XLSTMLargeState};
 
-// Use NdArray backend with Autodiff (CPU)
-type MyBackend = Autodiff<NdArray<f32>>;
+// Use CUDA backend with Autodiff
+type MyBackend = Autodiff<Cuda<f32, i32>>;
 
 /// Professional Tokenizer using Hugging Face 'tokenizers'
 pub struct Tokenizer {
@@ -62,7 +62,7 @@ impl Tokenizer {
             .build();
 
         let mut trainer_wrapper = TrainerWrapper::from(trainer);
-        let temp_file = "temp_train_large.txt";
+        let temp_file = "temp_train_large_cuda.txt";
         fs::write(temp_file, text)?;
         tokenizer.train_from_files(&mut trainer_wrapper, vec![temp_file.to_string()])
             .map_err(|e| format!("Error en entrenamiento: {}", e))?;
@@ -258,7 +258,6 @@ fn generate_text_typed<B: Backend>(
     let top_p = 1.0;
 
     let mut next_id = if let Some(logits) = last_logits {
-        // logits is [1, 1, V], sample_from_logits expects [1, V]
         let [_, _, v] = logits.dims();
         sample_from_logits(logits.reshape([1, v]), temp, top_k, top_p, r_penalty, &history)
     } else {
@@ -287,18 +286,18 @@ fn generate_text_typed<B: Backend>(
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    println!("xLSTMLarge Text Generation - Rust Port");
+    println!("xLSTMLarge Text Generation - GPU Port (CUDA)");
     println!("========================================\n");
 
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("Uso: cargo run --bin large_chat -- <archivo.txt>");
+        eprintln!("Uso: cargo run --bin large_chat_cuda -- <archivo.txt>");
         std::process::exit(1);
     }
 
     let text_file = &args[1];
-    let tokenizer_path = "large_v1.json";
-    let model_file = "large_v1_model.mpk";
+    let tokenizer_path = "large_v1_cuda.json";
+    let model_file = "large_v1_model_cuda.mpk";
 
     let target_vocab_size = 2048;
     let tokenizer = if Path::new(tokenizer_path).exists() { 
@@ -325,12 +324,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut r_penalty = 1.1;
     let seq_length = 256;
 
-    let device = Default::default();
+    let device = CudaDevice::default();
     let existe_modelo = Path::new(model_file).exists();
     let mut modo_inferencia = false;
     
     loop {
-        println!("\n--- CONFIGURACIÓN ACTUAL (xLSTMLarge) ---");
+        println!("\n--- CONFIGURACIÓN ACTUAL (xLSTMLarge GPU) ---");
         println!("  (1) Bloques: {}", num_blocks);
         println!("  (2) Heads:   {}", num_heads);
         println!("  (3) LR:      {}", lr);
@@ -415,12 +414,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
 
     let mut model: XLSTMLarge<MyBackend> = if existe_modelo {
-        println!("Cargando pesos del modelo...");
+        println!("Cargando pesos del modelo GPU...");
         let recorder = CompactRecorder::new();
         let record = recorder.load(model_file.into(), &device)?;
         XLSTMLarge::init(&config, &device).load_record(record)
     } else {
-        println!("Iniciando nuevo modelo desde cero...\n");
+        println!("Iniciando nuevo modelo GPU desde cero...\n");
         XLSTMLarge::init(&config, &device)
     };
 
@@ -468,9 +467,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let grads = GradientsParams::from_grads(grads, &model);
                     model = optim.step(lr as f64, model, grads);
 
-                    // Autoguardado cada 4 minutos
                     if last_save.elapsed() >= save_interval {
-                        println!("\n💾 Autoguardado preventivo (cada 4 min)...");
+                        println!("\n💾 Autoguardado preventivo (cuda)...");
                         let recorder = CompactRecorder::new();
                         model.clone().save_file(model_file.clone(), &recorder).ok();
                         last_save = Instant::now();
@@ -478,20 +476,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                     if batch_idx % 1 == 0 || batch_idx == num_batches - 1 {
                         let total_elapsed = total_train_start.elapsed().as_secs_f32();
-                        // Estimate total batches based on processed so far or first epoch
-                        // batches_per_epoch is not known exactly due to streaming, 
-                        // but we can estimate: (batch_idx+1) in this fragment, but we want absolute progress.
-                        // For a rough ETA, we'll use the total elapsed and current epoch progress.
-                        
-                        let epoch_progress = (epoch as f32) / (num_epochs as f32);
-                        // Within epoch, we don't know total batches but let's assume num_batches*total_fragments
-                        // A better way: total_elapsed / amount_processed * amount_remaining
-                        
                         let tps = (batch_count * tokens_per_batch) as f32 / epoch_start.elapsed().as_secs_f32().max(0.001);
                         let avg_loss = total_loss / batch_count as f32;
 
-                        // Very rough ETA: (processed_so_far / total_expected)
-                        // Let's just use a simple time per epoch estimate.
                         let time_per_epoch = total_elapsed / (epoch as f32 + (batch_idx as f32 / num_batches as f32).min(1.0)).max(0.001);
                         let remaining_epochs = (num_epochs as f32) - (epoch as f32 + (batch_idx as f32 / num_batches as f32).min(1.0));
                         let eta_h = (remaining_epochs * time_per_epoch) / 3600.0;
@@ -514,10 +501,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    println!("\n--- MODO INTERACTIVO ---");
+    println!("\n--- MODO INTERACTIVO (CUDA) ---");
     let mut current_len = 200;
     loop {
-        print!("Large Chat [len: {}] > ", current_len); 
+        print!("Large Chat CUDA [len: {}] > ", current_len); 
         io::stdout().flush()?;
         let mut input = String::new(); 
         io::stdin().read_line(&mut input)?;
@@ -537,7 +524,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let (generated, tokens, elapsed) = generate_text_typed(&model.valid(), &tokenizer, input, current_len, &device, temperature, r_penalty);
         let tps = tokens as f32 / elapsed.max(0.001);
         
-        println!("\n--- TEXTO GENERADO (xLSTMLarge) ---");
+        println!("\n--- TEXTO GENERADO (xLSTMLarge CUDA) ---");
         println!("{}", generated);
         println!("-----------------------------------");
         println!("Tokens: {} | Tiempo: {:.2}s | Velocidad: {:.2} tok/s\n", tokens, elapsed, tps);

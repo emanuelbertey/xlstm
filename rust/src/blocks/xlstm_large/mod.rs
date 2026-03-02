@@ -5,6 +5,6 @@ pub mod layer;
 pub mod model;
 
 pub use config::XLSTMLargeConfig;
-pub use model::{XLSTMLarge, XLSTMLargeState, mLSTMBlock, FeedForward};
+pub use model::{XLSTMLarge, XLSTMLargeState, MLSTMBlock, FeedForward};
 pub use components::{RMSNorm, soft_cap};
-pub use layer::mLSTMLayer;
+pub use layer::MLSTMLayer;
