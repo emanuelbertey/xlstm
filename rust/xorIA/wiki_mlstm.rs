@@ -326,8 +326,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let text_file = &args[1];
-    let tokenizer_path = "wiki_v3.json";
-    let model_base_path = "wiki_v3_model"; 
+    let tokenizer_path = "min.json";
+    let model_base_path = "min"; 
     let model_file = format!("{}.mpk", model_base_path);
 
     // Load or create tokenizer
@@ -346,9 +346,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let vocab_size = tokenizer.vocab_size();
     println!("Tamaño del vocabulario: {}\n", vocab_size);
 
-    let mut embedding_dim = 512;
-    let mut num_blocks = 4;
-    let mut num_heads = 8;
+    let mut embedding_dim = 256;
+    let mut num_blocks = 2;
+    let mut num_heads = 4;
     let mut lr = 8e-4;
     let mut num_epochs = 30;
     let mut batch_size = 16;

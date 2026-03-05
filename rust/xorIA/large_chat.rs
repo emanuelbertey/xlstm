@@ -28,7 +28,7 @@ use tokenizers::pre_tokenizers::metaspace::{Metaspace, PrependScheme};
 use tokenizers::tokenizer::Tokenizer as HFTokenizer;
 use tokenizers::models::TrainerWrapper;
 
-use xlstm::blocks::xlstm_large::{XLSTMLarge, XLSTMLargeConfig, XLSTMLargeState};
+use xlstm::blocks::xlstm_large::{XLSTMLarge, XLSTMLargeConfig};
 
 // Use NdArray backend with Autodiff (CPU)
 type MyBackend = Autodiff<NdArray<f32>>;
@@ -267,8 +267,12 @@ fn generate_text_typed<B: Backend>(
 
     for _ in 0..length {
         if let Some(token) = tokenizer.id_to_token(next_id) {
-            if token == "<|endoftext|>" { break; }
+            if token == "<|endoftext|>" { 
+                println!("=================<|endoftext|>======================\n");
+                break; 
+            }
         }
+
         result_ids.push(next_id);
         history.push(next_id);
         if history.len() > 64 { history.remove(0); }
@@ -297,10 +301,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let text_file = &args[1];
-    let tokenizer_path = "large_v1.json";
-    let model_file = "large_v1_model.mpk";
+    let tokenizer_path = "large_v1_cuda.json";
+    let model_file = "large_v1_model_cuda.mpk";
 
-    let target_vocab_size = 2048;
+    let target_vocab_size = 8192;
     let tokenizer = if Path::new(tokenizer_path).exists() { 
         println!("Cargando tokenizador existente...");
         Tokenizer::load(tokenizer_path)?
@@ -315,8 +319,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let vocab_size = tokenizer.vocab_size();
     println!("Tamaño del vocabulario: {}\n", vocab_size);
 
-    let mut embedding_dim = 512;
-    let mut num_blocks = 5;
+    let embedding_dim = 768;
+    let mut num_blocks = 6;
     let mut num_heads = 4;
     let mut lr = 3e-3;
     let mut num_epochs = 20;
